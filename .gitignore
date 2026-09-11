@@ -24,3 +24,6 @@ local.properties
 
 # Локальные секреты подписи
 gradle.properties
+
+# Heap dumps (OOM)
+*.hprof

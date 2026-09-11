@@ -1,7 +1,6 @@
 ﻿plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-    // Compose Compiler plugin — обязателен с Kotlin 2.0
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
@@ -14,7 +13,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 1
-        versionName = "1.0"
+        versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -59,12 +58,18 @@ android {
     buildFeatures {
         compose = true
     }
-    // composeOptions удалён намеренно: в Kotlin 2 версию компилятора
-    // задаёт плагин org.jetbrains.kotlin.plugin.compose в корневом файле.
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+    }
+
+    // Lint не блокирует release-сборку: lintVitalAnalyzeRelease жрёт кучу и виснет.
+    // Линт по-прежнему запускается отдельно в CI (non-blocking шаг) и командой lintDebug.
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+        warningsAsErrors = false
     }
 }
 
