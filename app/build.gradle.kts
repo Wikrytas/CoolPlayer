@@ -12,28 +12,18 @@ android {
         applicationId = "com.wikrytas.coolplayer"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "1.0.12"
+        versionCode = 14
+        versionName = "1.0.13"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
         }
 
-        // Whisper (whisper.cpp, JNI): собираем только под реальные ABI телефона,
-        // чтобы не раздувать APK эмуляторными архитектурами
-        ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
-        }
+        // Whisper: собираем натив только под реальные ABI телефона
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         externalNativeBuild {
-            cmake {
-                arguments += listOf(
-                    "-DANDROID_STL=c++_shared",
-                    "-DWHISPER_BUILD_EXAMPLES=OFF",
-                    "-DWHISPER_BUILD_TESTS=OFF",
-                    "-DBUILD_SHARED_LIBS=OFF"
-                )
-            }
+            cmake { arguments += "-DANDROID_STL=c++_shared" }
         }
     }
 
@@ -75,8 +65,7 @@ android {
         compose = true
         buildConfig = true
     }
-    // Нативный whisper.cpp (JNI): CMakeLists лежит в src/main/cpp.
-    // Первая сборка вытянет whisper.cpp через FetchContent — нужен интернет и NDK.
+    // Whisper (whisper.cpp) через CMake FetchContent
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
@@ -87,12 +76,7 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
-        jniLibs {
-            useLegacyPackaging = false
-        }
     }
-    // Lint не блокирует release-сборку: lintVitalAnalyzeRelease жрёт кучу и виснет.
-    // Линт по-прежнему запускается отдельно в CI (non-blocking шаг) и командой lintDebug.
     lint {
         checkReleaseBuilds = false
         abortOnError = false
