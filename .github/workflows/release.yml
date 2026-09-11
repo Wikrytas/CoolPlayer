@@ -1,4 +1,4 @@
-﻿name: Release
+name: Release
 
 on:
   push:
@@ -24,8 +24,15 @@ jobs:
 
       - name: Decode keystore
         run: |
-          echo "${{ secrets.COOLPLAYER_KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/keystore.jks"
+          echo "${{ secrets.COOLPLAYER_KEYSTORE_BASE64 }}" | tr -d '[:space:]' | base64 -d > "$RUNNER_TEMP/keystore.jks"
           ls -la "$RUNNER_TEMP/keystore.jks"
+          test -s "$RUNNER_TEMP/keystore.jks"
+
+      - name: Verify keystore
+        run: |
+          keytool -list -keystore "$RUNNER_TEMP/keystore.jks" -storepass "$COOLPLAYER_STORE_PASSWORD" | head -n 6
+        env:
+          COOLPLAYER_STORE_PASSWORD: ${{ secrets.COOLPLAYER_STORE_PASSWORD }}
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew

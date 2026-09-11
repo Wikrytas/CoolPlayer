@@ -21,3 +21,6 @@ local.properties
 *.log
 # Бэкапы
 *.zip
+
+# Локальные секреты подписи
+gradle.properties
