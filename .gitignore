@@ -27,3 +27,6 @@ gradle.properties
 
 # Heap dumps (OOM)
 *.hprof
+
+# Release artifacts
+dist/
