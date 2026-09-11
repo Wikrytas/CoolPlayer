@@ -1,4 +1,4 @@
-﻿# ── jaudiotagger (LGPL): теги аудио, активная рефлексия ──
+# ── jaudiotagger (LGPL): теги аудио, активная рефлексия ──
 -keep class org.jaudiotagger.** { *; }
 -keep interface org.jaudiotagger.** { *; }
 -dontwarn org.jaudiotagger.**
@@ -14,11 +14,11 @@
 -dontwarn coil.**
 
 # ── Точки входа, которые вызывает система ──
--keep class com.example.coolplayer.audio.PlaybackService { *; }
--keep class com.example.coolplayer.widget.MusicWidgetProvider { *; }
+-keep class com.wikrytas.coolplayer.audio.PlaybackService { *; }
+-keep class com.wikrytas.coolplayer.widget.MusicWidgetProvider { *; }
 
 # ── Модели, используемые в Compose/сериализации ──
--keep class com.example.coolplayer.models.** { *; }
+-keep class com.wikrytas.coolplayer.models.** { *; }
 
 # ── Enum (SortMode, EqPreset, SleepMode...) ──
 -keepclassmembers enum * {

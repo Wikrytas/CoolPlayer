@@ -24,7 +24,7 @@ object AppUpdater {
     private const val TAG = "AppUpdater"
 
     // TODO: замените на ваш репозиторий GitHub
-    private const val REPO_OWNER = "YOUR_GITHUB_LOGIN"
+    private const val REPO_OWNER = "Wikrytas"
     private const val REPO_NAME = "CoolPlayer"
 
     suspend fun checkForUpdate(context: Context): UpdateInfo? = withContext(Dispatchers.IO) {
