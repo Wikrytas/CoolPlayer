@@ -1,27 +1,30 @@
-# ── jaudiotagger (LGPL): теги аудио, активная рефлексия ──
--keep class org.jaudiotagger.** { *; }
--keep interface org.jaudiotagger.** { *; }
--dontwarn org.jaudiotagger.**
--dontwarn java.awt.**
--dontwarn javax.sound.**
-
-# ── Media3 / ExoPlayer ──
--keep class androidx.media3.** { *; }
--dontwarn androidx.media3.**
-
-# ── Coil ──
--keep class coil.** { *; }
--dontwarn coil.**
-
-# ── Точки входа, которые вызывает система ──
+﻿# ── Компоненты, упомянутые в манифесте (на всякий случай) ──
 -keep class com.wikrytas.coolplayer.audio.PlaybackService { *; }
 -keep class com.wikrytas.coolplayer.widget.MusicWidgetProvider { *; }
 
-# ── Модели, используемые в Compose/сериализации ──
--keep class com.wikrytas.coolplayer.models.** { *; }
+# ── jaudiotagger: теги читаются через рефлексию,
+#    внутри есть ссылки на desktop-only классы — гасим предупреждения ──
+-keep class org.jaudiotagger.** { *; }
+-keep interface org.jaudiotagger.** { *; }
+-keep enum org.jaudiotagger.** { *; }
+-dontwarn org.jaudiotagger.**
+-dontwarn java.awt.**
+-dontwarn javax.sound.**
+-dontwarn javax.activation.**
+-dontwarn org.apache.**
+-dontwarn sun.**
+-dontwarn com.sun.**
 
-# ── Enum (SortMode, EqPreset, SleepMode...) ──
--keepclassmembers enum * {
-    public static **[] values();
-    public static ** valueOf(java.lang.String);
+# ── Coroutines / Kotlin ──
+-dontwarn kotlinx.**
+-keepclassmembers class kotlinx.coroutines.** {
+    volatile <fields>;
 }
+
+# ── Читаемые стектрейсы в релизных крашах ──
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile
+
+# ── Модели данных (используются в Compose по имени полей) ──
+-keepclassmembers class com.wikrytas.coolplayer.models.** { *; }
+-keepclassmembers class com.wikrytas.coolplayer.data.LyricsCandidate { *; }
