@@ -1,0 +1,23 @@
+# Gradle
+.gradle/
+build/
+app/build/
+app/.gradle/
+build/reports/
+
+# Локальные пути SDK
+local.properties
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Keystore (никогда в репозиторий)
+*.jks
+*.keystore
+
+# Логи
+*.log
+# ������
+*.zip

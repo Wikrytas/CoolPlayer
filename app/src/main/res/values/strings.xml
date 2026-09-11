@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Имя приложения (манифест, канал уведомлений) -->
+    <string name="app_name">CoolPlayer</string>
+
+    <!-- Статусы загрузочного экрана (BootScreen) -->
+    <string name="boot_check_perms">Проверка разрешений…</string>
+    <string name="boot_loading_library">Загрузка библиотеки…</string>
+    <string name="boot_connecting_player">Подключение к плееру…</string>
+
+    <!-- Ошибки -->
+    <string name="error_player_connect">Не удалось подключиться к плееру после %1$d попыток</string>
+</resources>

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Единый фон старта: системный splash (themes.xml) = BootScreen = края интро -->
+    <color name="bg_splash">#FF05070F</color>
+
+    <!-- Фон адаптивной иконки лаунчера.
+         Если у тебя он был другого цвета и иконка стала выглядеть иначе —
+         верни прежнее значение, на работу приложения это не влияет. -->
+    <color name="ic_launcher_background">#FF05070F</color>
+</resources>
