@@ -9,18 +9,22 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 import java.util.zip.ZipFile
 
 data class UpdateInfo(
     val versionName: String,
     val downloadUrl: String,
-    val releaseNotes: String,
-    val isNewer: Boolean
+    val altDownloadUrl: String = "",
+    val expectedSha256: String = "",
+    val releaseNotes: String = "",
+    val isNewer: Boolean = false
 )
 
 object AppUpdater {
@@ -28,9 +32,10 @@ object AppUpdater {
     private const val REPO_OWNER = "Wikrytas"
     private const val REPO_NAME = "CoolPlayer"
 
-    /** Человекочитаемая причина последней неудачи скачивания. */
     var lastDownloadError: String? = null
         private set
+    private var altUrlCache: String? = null
+    private var expectedShaCache: String? = null
 
     suspend fun checkForUpdate(context: Context): UpdateInfo? = withContext(Dispatchers.IO) {
         try {
@@ -51,12 +56,16 @@ object AppUpdater {
             val tag = json.optString("tag_name", "")
             val notes = json.optString("body", "")
             var apkUrl = ""
+            var apkAltUrl = ""
+            var apkDigest = ""
             val assets = json.optJSONArray("assets")
             if (assets != null) {
                 for (i in 0 until assets.length()) {
                     val a = assets.optJSONObject(i) ?: continue
                     if (a.optString("name", "").endsWith(".apk")) {
                         apkUrl = a.optString("browser_download_url", "")
+                        apkAltUrl = a.optString("url", "")
+                        apkDigest = a.optString("digest", "").removePrefix("sha256:")
                         break
                     }
                 }
@@ -65,11 +74,15 @@ object AppUpdater {
                 AppLogger.w(TAG, "release has no .apk asset")
                 return@withContext null
             }
+            altUrlCache = apkAltUrl.takeIf { it.isNotBlank() }
+            expectedShaCache = apkDigest.takeIf { it.isNotBlank() }
             val remoteVersion = tag.removePrefix("v").trim()
             val currentVersion = currentVersionName(context)
             UpdateInfo(
                 versionName = remoteVersion,
                 downloadUrl = apkUrl,
+                altDownloadUrl = apkAltUrl,
+                expectedSha256 = apkDigest,
                 releaseNotes = notes,
                 isNewer = compareVersions(remoteVersion, currentVersion) > 0
             )
@@ -86,7 +99,6 @@ object AppUpdater {
             "0.0.0"
         }
 
-    /** Сравнение версий любой длины: 1.0.1.1 > 1.0.1 и т.д. */
     fun compareVersions(remote: String, current: String): Int {
         val r = remote.split(".").map { it.takeWhile { ch -> ch.isDigit() }.toIntOrNull() ?: 0 }
         val c = current.split(".").map { it.takeWhile { ch -> ch.isDigit() }.toIntOrNull() ?: 0 }
@@ -99,29 +111,55 @@ object AppUpdater {
         return 0
     }
 
-    /** Скачивание с проверкой размера и ZIP-целостности, один авторетрай. */
+    /** До 3 попыток (основной URL x2 + запасной API-URL), ZIP- и SHA256-контроль. */
     suspend fun downloadApk(context: Context, url: String, onProgress: (Int) -> Unit): File? =
         withContext(Dispatchers.IO) {
             lastDownloadError = null
-            var attempt = 0
-            while (attempt < 2) {
-                attempt++
-                val f = downloadOnce(url, onProgress)
+            val alt = altUrlCache?.takeIf { it.isNotBlank() && it != url }
+            val seq = listOfNotNull(url, url, alt)
+            for ((idx, u) in seq.withIndex()) {
+                AppLogger.i(TAG, "download attempt ${idx + 1}/${seq.size}: $u")
+                val f = downloadOnce(context, u, onProgress)
                 if (f != null && zipOk(f)) {
+                    val expected = expectedShaCache
+                    if (!expected.isNullOrBlank()) {
+                        val actual = sha256Hex(f)
+                        if (!actual.equals(expected, ignoreCase = true)) {
+                            AppLogger.w(TAG, "sha256 mismatch: expected=$expected actual=$actual")
+                            lastDownloadError = "Попытка ${idx + 1}: хеш не совпал (файл побит при скачивании)"
+                            f.delete()
+                            delay(1500L * (idx + 1))
+                            continue
+                        }
+                        AppLogger.i(TAG, "sha256 ok: $actual")
+                    }
                     AppLogger.i(TAG, "apk downloaded and verified: ${f.length()} bytes")
+                    onProgress(100)
                     return@withContext f
                 }
-                AppLogger.w(TAG, "apk attempt $attempt failed or corrupt")
-                lastDownloadError = "Файл повреждён при скачивании, повторяю..."
+                lastDownloadError = "Попытка ${idx + 1}: файл битый или обрыв сети"
+                delay(1500L * (idx + 1))
             }
-            lastDownloadError = "Не удалось скачать целостный APK"
+            lastDownloadError = "Не удалось скачать целостный APK (3 попытки)"
+            AppLogger.w(TAG, "download failed after ${seq.size} attempts")
             null
         }
 
     private fun zipOk(f: File): Boolean =
         runCatching { ZipFile(f).use { it.size() > 0 } }.getOrDefault(false)
 
-    private suspend fun downloadOnce(url: String, onProgress: (Int) -> Unit): File? =
+    private fun sha256Hex(f: File): String =
+        runCatching {
+            val md = MessageDigest.getInstance("SHA-256")
+            f.inputStream().use { inp ->
+                val buf = ByteArray(64 * 1024)
+                var r: Int
+                while (inp.read(buf).also { r = it } != -1) md.update(buf, 0, r)
+            }
+            md.digest().joinToString("") { "%02x".format(it) }
+        }.getOrDefault("")
+
+    private suspend fun downloadOnce(context: Context, url: String, onProgress: (Int) -> Unit): File? =
         withContext(Dispatchers.IO) {
             try {
                 val conn = URL(url).openConnection() as HttpURLConnection
@@ -129,13 +167,16 @@ object AppUpdater {
                 conn.readTimeout = 60000
                 conn.instanceFollowRedirects = true
                 conn.setRequestProperty("User-Agent", "CoolPlayer-Updater")
+                if (url.contains("api.github.com")) {
+                    conn.setRequestProperty("Accept", "application/octet-stream")
+                }
                 if (conn.responseCode != 200) {
                     AppLogger.w(TAG, "download http ${conn.responseCode}")
                     conn.disconnect()
                     return@withContext null
                 }
                 val total = conn.contentLengthLong
-                val outFile = File(context_cacheDir(), "update.apk")
+                val outFile = File(context.cacheDir, "update.apk")
                 var downloaded = 0L
                 conn.inputStream.use { input ->
                     outFile.outputStream().use { output ->
@@ -155,24 +196,13 @@ object AppUpdater {
                     outFile.delete()
                     return@withContext null
                 }
-                onProgress(100)
                 outFile
             } catch (e: Exception) {
-                AppLogger.e(TAG, "download failed", e)
+                AppLogger.e(TAG, "download failed: ${e.javaClass.simpleName}: ${e.message}", e)
                 null
             }
         }
 
-    // Кэш-директория задаётся извне при инициализации
-    private var cacheDirRef: File? = null
-    private fun context_cacheDir(): File =
-        cacheDirRef ?: throw IllegalStateException("AppUpdater not initialized")
-
-    fun init(context: Context) {
-        cacheDirRef = context.cacheDir
-    }
-
-    /** true, если подпись нового APK отличается от установленной версии. */
     fun signatureMismatch(ctx: Context, file: File): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
         val pm = ctx.packageManager
@@ -203,7 +233,6 @@ object AppUpdater {
         }
     }
 
-    /** Установка с предварительной проверкой подписи. */
     fun installApk(context: Context, apk: File): Boolean {
         if (signatureMismatch(context, apk)) {
             Toast.makeText(

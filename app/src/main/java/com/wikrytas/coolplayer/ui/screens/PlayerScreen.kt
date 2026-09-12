@@ -1,4 +1,4 @@
-package com.wikrytas.coolplayer.ui.screens
+﻿package com.wikrytas.coolplayer.ui.screens
 
 import android.app.Activity
 import android.content.res.Configuration
@@ -41,11 +41,14 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.automirrored.filled.TextSnippet
+import androidx.compose.material.icons.filled.TextSnippet
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -73,6 +76,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wikrytas.coolplayer.data.AppLogger
 import com.wikrytas.coolplayer.data.AppSettings
+import com.wikrytas.coolplayer.data.CoolDb
 import com.wikrytas.coolplayer.data.LyricsOffsetStore
 import com.wikrytas.coolplayer.data.LyricsRepository
 import com.wikrytas.coolplayer.data.ThemeRepository
@@ -89,9 +93,9 @@ import com.wikrytas.coolplayer.ui.components.player.Pressable
 import com.wikrytas.coolplayer.ui.theme.PlayerTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import androidx.compose.material3.TextButton
 
 private const val TAG = "Player"
+private val LRC_REGEX = Regex("\\[\\d{2}:\\d{2}")
 
 private fun formatTime(ms: Long): String {
     if (ms <= 0) return "0:00"
@@ -168,9 +172,7 @@ fun PlayerScreen(
             } catch (e: SecurityException) {
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
                     runCatching {
-                        val pi = android.provider.MediaStore.createDeleteRequest(
-                            context.contentResolver, listOf(track.uri)
-                        )
+                        val pi = android.provider.MediaStore.createDeleteRequest(context.contentResolver, listOf(track.uri))
                         pendingDeleteUri = track.uri
                         deleteLauncher.launch(IntentSenderRequest.Builder(pi.intentSender).build())
                     }.onFailure {
@@ -186,15 +188,23 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(isLandscape) {
-        AppLogger.d(TAG, "orientation: ${if (isLandscape) "landscape" else "portrait"}")
-    }
-
     LaunchedEffect(state.selectedTrack?.id) {
         val t = state.selectedTrack ?: return@LaunchedEffect
         lyricsOffset = offsetStore.getOffset(t.id)
         delay(400)
-        rawLyricsContent = lyricsRepository.resolveLyrics(t, useOnline = appSettings.autoLyricsOnline)
+        var content = lyricsRepository.getCachedLyrics(t)
+        if (content.isNullOrBlank()) {
+            val hit = CoolDb.fetch(t)
+            if (hit != null) {
+                lyricsRepository.cacheLyrics(t, hit, true)
+                content = hit
+                AppLogger.i(TAG, "cooldb hit in player: id=${t.id}")
+            }
+        }
+        if (content.isNullOrBlank() && appSettings.autoLyricsOnline) {
+            content = lyricsRepository.resolveLyrics(t, useOnline = true)
+        }
+        rawLyricsContent = content
     }
 
     val writeLauncher = rememberLauncherForActivityResult(
@@ -209,15 +219,11 @@ fun PlayerScreen(
                 val success = lyricsRepository.retryEmbedWithPermission(t, content)
                 isEmbedding = false
                 if (success) {
-                    val synced = content.contains(Regex("\\[\\d{2}:\\d{2}"))
+                    val synced = content.contains(LRC_REGEX)
                     lyricsRepository.cacheLyrics(t, content, synced)
                     rawLyricsContent = content
                 }
-                Toast.makeText(
-                    context,
-                    if (success) "✅ Текст встроен в файл" else "❌ Не удалось встроить",
-                    Toast.LENGTH_SHORT
-                ).show()
+                Toast.makeText(context, if (success) "Текст встроен в файл" else "Не удалось встроить", Toast.LENGTH_SHORT).show()
             }
         }
         pendingEmbedTrack = null
@@ -234,11 +240,10 @@ fun PlayerScreen(
         val content = lyricsRepository.getCachedLyrics(t)
             ?: rawLyricsContent
             ?: run {
-                AppLogger.w(TAG, "embed abort: no cached/raw lyrics for id=${t.id}")
                 Toast.makeText(context, "Текст не найден", Toast.LENGTH_SHORT).show()
                 return
             }
-        val synced = content.contains(Regex("\\[\\d{2}:\\d{2}"))
+        val synced = content.contains(LRC_REGEX)
         AppLogger.i(TAG, "embed requested: id=${t.id}, len=${content.length}, synced=$synced")
         isEmbedding = true
         scope.launch {
@@ -248,58 +253,37 @@ fun PlayerScreen(
                 result.success -> {
                     lyricsRepository.cacheLyrics(t, content, synced)
                     rawLyricsContent = content
-                    Toast.makeText(context, "✅ Текст встроен в файл", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Текст встроен в файл", Toast.LENGTH_SHORT).show()
                 }
                 result.needsPermission && result.intentSender != null -> {
-                    AppLogger.w(TAG, "embed needs SAF permission: id=${t.id}")
                     pendingEmbedTrack = t
                     pendingEmbedContent = content
-                    runCatching {
-                        writeLauncher.launch(IntentSenderRequest.Builder(result.intentSender).build())
-                    }.onFailure {
-                        Toast.makeText(context, "Не удалось запросить права", Toast.LENGTH_SHORT).show()
-                    }
+                    runCatching { writeLauncher.launch(IntentSenderRequest.Builder(result.intentSender).build()) }
                 }
-                else ->
-                    Toast.makeText(context, result.error ?: "Не удалось встроить", Toast.LENGTH_LONG).show()
+                else -> Toast.makeText(context, result.error ?: "Не удалось встроить", Toast.LENGTH_LONG).show()
             }
         }
     }
 
+    fun changeOffset(delta: Long) {
+        val t = state.selectedTrack ?: return
+        val newOffset = (lyricsOffset + delta).coerceIn(-10_000L, 10_000L)
+        lyricsOffset = newOffset
+        AppLogger.d(TAG, "lyrics offset: ${newOffset}ms (delta ${delta}ms)")
+        scope.launch { offsetStore.setOffset(t.id, newOffset) }
+    }
+
     val headerBlock: @Composable () -> Unit = {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 4.dp)
-        ) {
+        Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
             Pressable(onClick = onOpenLibrary, modifier = Modifier.align(Alignment.Center).size(44.dp)) {
-                Icon(
-                    Icons.Default.KeyboardArrowDown,
-                    contentDescription = "К библиотеке",
-                    tint = Color.White.copy(alpha = 0.9f),
-                    modifier = Modifier.size(28.dp)
-                )
+                Icon(Icons.Default.KeyboardArrowDown, "К библиотеке", tint = Color.White.copy(alpha = 0.9f), modifier = Modifier.size(28.dp))
             }
-            // Кнопка текста + шестерёнка справа
-            Row(
-                modifier = Modifier.align(Alignment.CenterEnd),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Row(modifier = Modifier.align(Alignment.CenterEnd), verticalAlignment = Alignment.CenterVertically) {
                 Pressable(onClick = onOpenLyrics, modifier = Modifier.size(40.dp)) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.TextSnippet,
-                        contentDescription = "Открыть текст песни",
-                        tint = Color.White.copy(alpha = 0.9f),
-                        modifier = Modifier.size(22.dp)
-                    )
+                    Icon(Icons.Default.TextSnippet, "Текст песни", tint = Color.White.copy(alpha = 0.9f), modifier = Modifier.size(22.dp))
                 }
                 Pressable(onClick = onOpenSettings, modifier = Modifier.size(40.dp)) {
-                    Icon(
-                        Icons.Default.Settings,
-                        contentDescription = "Настройки",
-                        tint = Color.White.copy(alpha = 0.9f),
-                        modifier = Modifier.size(22.dp)
-                    )
+                    Icon(Icons.Default.Settings, "Настройки", tint = Color.White.copy(alpha = 0.9f), modifier = Modifier.size(22.dp))
                 }
             }
         }
@@ -332,9 +316,7 @@ fun PlayerScreen(
                         }
                     }
                     .combinedClickable(
-                        onClick = {
-                            showLyricsInsteadOfCover = !showLyricsInsteadOfCover
-                        },
+                        onClick = { showLyricsInsteadOfCover = !showLyricsInsteadOfCover },
                         onLongClick = { lyricsMenuExpanded = true }
                     ),
                 contentAlignment = Alignment.Center
@@ -367,10 +349,7 @@ fun PlayerScreen(
     }
 
     val metaBlock: @Composable () -> Unit = {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(
                 modifier = Modifier
                     .weight(1f)
@@ -384,30 +363,17 @@ fun PlayerScreen(
                         }
                     )
             ) {
-                Text(
-                    text = state.selectedTrack?.title ?: "Выберите трек",
-                    fontSize = 20.sp, fontWeight = FontWeight.Bold, fontStyle = FontStyle.Normal,
-                    color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis
-                )
+                Text(state.selectedTrack?.title ?: "Выберите трек", fontSize = 20.sp, fontWeight = FontWeight.Bold, fontStyle = FontStyle.Normal, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(4.dp))
-                Text(
-                    text = state.selectedTrack?.artist ?: "Исполнитель",
-                    fontSize = 14.sp, fontStyle = FontStyle.Normal,
-                    color = Color.White.copy(alpha = 0.6f), maxLines = 1, overflow = TextOverflow.Ellipsis
-                )
+                Text(state.selectedTrack?.artist ?: "Исполнитель", fontSize = 14.sp, fontStyle = FontStyle.Normal, color = Color.White.copy(alpha = 0.6f), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Pressable(
-                onClick = {
-                    state.selectedTrack?.id?.let { id ->
-                        AppLogger.d(TAG, "favorite toggled: id=$id, was=${favorites.contains(id)}")
-                        onToggleFavorite(id)
-                    }
-                },
+                onClick = { state.selectedTrack?.id?.let { id -> onToggleFavorite(id) } },
                 modifier = Modifier.size(44.dp)
             ) {
                 Icon(
                     if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                    contentDescription = "В избранное",
+                    "В избранное",
                     tint = if (isFavorite) Color(0xFFFF4081) else Color.White.copy(alpha = 0.85f),
                     modifier = Modifier.size(24.dp)
                 )
@@ -416,15 +382,8 @@ fun PlayerScreen(
     }
 
     val seekBlock: @Composable () -> Unit = {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                formatTime(if (state.duration > 0) state.position else 0),
-                color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp, fontStyle = FontStyle.Normal,
-                modifier = Modifier.width(38.dp)
-            )
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(formatTime(if (state.duration > 0) state.position else 0), color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp, modifier = Modifier.width(38.dp))
             Box(Modifier.weight(1f)) {
                 GlowSeekBar(
                     positionMs = state.position,
@@ -436,11 +395,7 @@ fun PlayerScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
-            Text(
-                formatTime(state.duration),
-                color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp, fontStyle = FontStyle.Normal,
-                modifier = Modifier.width(38.dp), textAlign = TextAlign.End
-            )
+            Text(formatTime(state.duration), color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp, modifier = Modifier.width(38.dp), textAlign = TextAlign.End)
         }
     }
 
@@ -474,26 +429,18 @@ fun PlayerScreen(
                         verticalDrag = 0f
                     },
                     onDragCancel = { verticalDrag = 0f }
-                ) { change, dragAmount ->
-                    change.consume()
-                    verticalDrag += dragAmount
-                }
+                ) { change, dragAmount -> change.consume(); verticalDrag += dragAmount }
             }
     ) {
         FlowingThemeBackground(top = color1, bottom = color2, accent = accent)
         if (isLandscape) {
-            Column(
-                modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
-            ) {
+            Column(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
                 headerBlock()
                 Row(
                     modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    BoxWithConstraints(
-                        modifier = Modifier.weight(1f).fillMaxHeight(),
-                        contentAlignment = Alignment.Center
-                    ) {
+                    BoxWithConstraints(modifier = Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
                         val s = maxWidth.coerceAtMost(maxHeight * 0.95f)
                         coverBlock(Modifier.size(s))
                     }
@@ -513,20 +460,14 @@ fun PlayerScreen(
                 Spacer(Modifier.height(8.dp))
             }
         } else {
-            Column(
-                modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
-            ) {
+            Column(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
                 headerBlock()
                 Column(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
-                ) {
-                    coverBlock(Modifier.fillMaxWidth(0.74f).aspectRatio(1f))
-                }
-                visualizerBlock(
-                    Modifier.fillMaxWidth().height(72.dp).padding(horizontal = 12.dp)
-                )
+                ) { coverBlock(Modifier.fillMaxWidth(0.74f).aspectRatio(1f)) }
+                visualizerBlock(Modifier.fillMaxWidth().height(72.dp).padding(horizontal = 12.dp))
                 Spacer(Modifier.height(4.dp))
                 Column(Modifier.padding(horizontal = 24.dp)) { metaBlock() }
                 Spacer(Modifier.height(10.dp))
@@ -543,7 +484,6 @@ fun PlayerScreen(
             }
         }
 
-        // ДОЛГОЕ НАЖАТИЕ НА ОБЛОЖКЕ: только встроить + автопоиск
         DropdownMenu(
             expanded = lyricsMenuExpanded,
             onDismissRequest = { lyricsMenuExpanded = false },
@@ -569,29 +509,35 @@ fun PlayerScreen(
                     scope.launch { themeRepository.saveAutoLyricsOnline(next) }
                 }
             )
+            HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
+            DropdownMenuItem(
+                text = { Text("Синхронизация: ${if (lyricsOffset >= 0) "+" else ""}$lyricsOffset мс (сброс)", color = Color.White.copy(alpha = 0.7f)) },
+                onClick = {
+                    lyricsMenuExpanded = false
+                    val t = state.selectedTrack ?: return@DropdownMenuItem
+                    lyricsOffset = 0L
+                    scope.launch { offsetStore.setOffset(t.id, 0L) }
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("Текст раньше на 0.5 с", color = Color.White) },
+                onClick = { changeOffset(-500L) }
+            )
+            DropdownMenuItem(
+                text = { Text("Текст позже на 0.5 с", color = Color.White) },
+                onClick = { changeOffset(+500L) }
+            )
         }
 
         deleteConfirm?.let { t ->
-            androidx.compose.material3.AlertDialog(
+            AlertDialog(
                 onDismissRequest = { deleteConfirm = null },
                 title = { Text("Удалить трек с устройства?", color = Color.White) },
-                text = {
-                    Text(
-                        "«${t.title}» будет удалён безвозвратно вместе с файлом.",
-                        color = Color.White.copy(alpha = 0.7f)
-                    )
-                },
+                text = { Text("«${t.title}» будет удалён безвозвратно вместе с файлом.", color = Color.White.copy(alpha = 0.7f)) },
                 confirmButton = {
-                    TextButton(onClick = {
-                        deleteConfirm = null
-                        deleteFromDevice(t)
-                    }) { Text("Удалить", color = Color(0xFFFF5252)) }
+                    TextButton(onClick = { deleteConfirm = null; deleteFromDevice(t) }) { Text("Удалить", color = Color(0xFFFF5252)) }
                 },
-                dismissButton = {
-                    TextButton(onClick = { deleteConfirm = null }) {
-                        Text("Отмена", color = Color.White.copy(alpha = 0.7f))
-                    }
-                },
+                dismissButton = { TextButton(onClick = { deleteConfirm = null }) { Text("Отмена", color = Color.White.copy(alpha = 0.7f)) } },
                 containerColor = Color(0xFF171021)
             )
         }

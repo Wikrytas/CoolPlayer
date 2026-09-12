@@ -1,11 +1,8 @@
 package com.wikrytas.coolplayer.ui.screens
 
-import android.app.Activity
 import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -15,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -23,8 +21,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -54,9 +55,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.wikrytas.coolplayer.data.AppLogger
+import com.wikrytas.coolplayer.data.CoolDb
+import com.wikrytas.coolplayer.data.LyricsCandidate
 import com.wikrytas.coolplayer.data.LyricsOffsetStore
 import com.wikrytas.coolplayer.data.LyricsRepository
-import com.wikrytas.coolplayer.data.OnDeviceAligner
 import com.wikrytas.coolplayer.data.PcSync
 import com.wikrytas.coolplayer.models.Track
 import com.wikrytas.coolplayer.ui.PlayerViewModel
@@ -79,7 +81,11 @@ fun parseLrcContent(content: String): List<LyricLine> {
                     val seconds = match.groupValues[2].toLong()
                     val millis = match.groupValues.getOrNull(3) ?: "0"
                     val timeMs = minutes * 60000 + seconds * 1000 +
-                            when (millis.length) { 2 -> millis.toLong() * 10; 3 -> millis.toLong(); else -> 0L }
+                            when (millis.length) {
+                                2 -> millis.toLong() * 10
+                                3 -> millis.toLong()
+                                else -> 0L
+                            }
                     lines.add(LyricLine(timeMs, text))
                 }
             }
@@ -96,6 +102,7 @@ fun parsePlainLyrics(content: String): List<LyricLine> =
         }
 
 private val LRC_REGEX = Regex("\\[\\d{2}:\\d{2}")
+private const val TAG = "LyricsScreen"
 
 @Composable
 fun LyricsScreen(
@@ -115,32 +122,21 @@ fun LyricsScreen(
     var notFound by remember(track?.id) { mutableStateOf(false) }
     var isCached by remember(track?.id) { mutableStateOf(false) }
     var menuExpanded by remember { mutableStateOf(false) }
-    var isEmbedding by remember { mutableStateOf(false) }
-    var isAligning by remember { mutableStateOf(false) }
+
     var pcSyncing by remember { mutableStateOf(false) }
     var hostDialog by remember { mutableStateOf(false) }
     var hostInput by remember { mutableStateOf("") }
     var autoSyncInput by remember { mutableStateOf(false) }
-    var lyricsOffset by remember(track?.id) { mutableStateOf(0L) }
-    var pendingEmbedTrack by remember { mutableStateOf<Track?>(null) }
-    var pendingEmbedContent by remember { mutableStateOf<String?>(null) }
 
-    val writeLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartIntentSenderForResult()
-    ) { result ->
-        val t = pendingEmbedTrack
-        val content = pendingEmbedContent
-        if (result.resultCode == Activity.RESULT_OK && t != null && content != null) {
-            scope.launch {
-                isEmbedding = true
-                val ok = lyricsRepository.retryEmbedWithPermission(t, content)
-                isEmbedding = false
-                Toast.makeText(context, if (ok) "Текст встроен" else "Не удалось встроить", Toast.LENGTH_SHORT).show()
-            }
-        }
-        pendingEmbedTrack = null
-        pendingEmbedContent = null
-    }
+    var searchOpen by remember(track?.id) { mutableStateOf(false) }
+    var searchArtist by remember(track?.id) { mutableStateOf("") }
+    var searchTitle by remember(track?.id) { mutableStateOf("") }
+    var searchSyncedOnly by remember { mutableStateOf(false) }
+    var searching by remember { mutableStateOf(false) }
+    var candidates by remember { mutableStateOf<List<LyricsCandidate>>(emptyList()) }
+
+    var pasteDialog by remember { mutableStateOf(false) }
+    var pasteText by remember { mutableStateOf("") }
 
     val uiState by playerViewModel.uiState.collectAsState()
     val currentPosition = uiState.position
@@ -152,53 +148,73 @@ fun LyricsScreen(
         notFound = false
     }
 
+    fun openSearch() {
+        val t = track ?: return
+        searchArtist = t.artist.takeUnless { it.isBlank() || it.contains("unknown", true) || it.contains("неизвестн", true) } ?: ""
+        searchTitle = t.title
+        candidates = emptyList()
+        searchOpen = true
+    }
+
     fun runPcSync(showToast: Boolean) {
         val t = track ?: return
         val plain = rawContent ?: return
         if (plain.contains(LRC_REGEX)) return
         pcSyncing = true
         scope.launch {
-            AppLogger.i("PcSync", "start align via PC: id=${t.id}")
-            val lrc = PcSync.alignViaPc(context, t.uri, plain, t.id)
+            AppLogger.i(TAG, "pc sync start: id=${t.id}")
+            val lrc = PcSync.alignViaPc(context, t, plain)
             pcSyncing = false
             if (lrc != null) {
                 lyricsRepository.cacheLyrics(t, lrc, true)
                 applyContent(lrc)
-                AppLogger.i("PcSync", "align OK: id=${t.id}")
-                if (showToast) Toast.makeText(context, "✅ Синхротекст получен с ПК", Toast.LENGTH_SHORT).show()
+                isCached = true
+                AppLogger.i(TAG, "pc sync OK: id=${t.id}")
+                if (showToast) Toast.makeText(context, "✅ Синхротекст получен", Toast.LENGTH_SHORT).show()
             } else {
-                AppLogger.w("PcSync", "align failed: id=${t.id}")
-                if (showToast) Toast.makeText(context, "ПК не ответил / ошибка выравнивания", Toast.LENGTH_SHORT).show()
+                AppLogger.w(TAG, "pc sync failed: id=${t.id}")
+                if (showToast) Toast.makeText(context, "Сервер не ответил / ошибка выравнивания", Toast.LENGTH_SHORT).show()
             }
         }
     }
 
-    suspend fun loadLyrics(forceRefresh: Boolean = false) {
+    suspend fun loadLyrics() {
         isLoading = true
         notFound = false
         val t = track ?: run { isLoading = false; return }
-        lyricsOffset = offsetStore.getOffset(t.id)
-        if (forceRefresh) { lyricsRepository.clearCache(t); isCached = false }
-        else isCached = lyricsRepository.getCachedLyrics(t) != null
-        val content = runCatching {
-            lyricsRepository.resolveLyrics(t, forceOnline = forceRefresh, useOnline = true)
-        }.getOrNull()
+        var content = lyricsRepository.getCachedLyrics(t)
+        isCached = !content.isNullOrBlank()
+        if (content.isNullOrBlank()) {
+            val hit = CoolDb.fetch(t)
+            if (hit != null) {
+                lyricsRepository.cacheLyrics(t, hit, true)
+                content = hit
+                isCached = true
+                AppLogger.i(TAG, "cooldb hit: id=${t.id}")
+            }
+        }
+        if (content.isNullOrBlank()) {
+            content = runCatching {
+                lyricsRepository.resolveLyrics(t, forceOnline = false, useOnline = true)
+            }.getOrNull()
+        }
         if (!content.isNullOrBlank()) {
             applyContent(content)
         } else {
-            rawContent = null; lyricLines = null; notFound = true
+            rawContent = null
+            lyricLines = null
+            notFound = true
+            openSearch()
         }
         isLoading = false
-        // Автосинхронизация через ПК, если нашли только plain и ПК включён
-        if (!content.isNullOrBlank() && !content.contains(LRC_REGEX)
-            && PcSync.enabled(context) && PcSync.host(context).isNotBlank()
-        ) {
+        if (rawContent != null && rawContent?.contains(LRC_REGEX) == false && PcSync.enabled(context)) {
             runPcSync(showToast = false)
         }
     }
 
     LaunchedEffect(track?.id) { loadLyrics() }
 
+    val lyricsOffset = remember(track?.id) { offsetStore.getOffset(track?.id ?: 0L) }
     val isSynced = remember(lyricLines) { lyricLines?.any { it.timeMs > 0L } == true }
 
     val currentLineIndex = remember(lyricLines, currentPosition, lyricsOffset) {
@@ -219,9 +235,33 @@ fun LyricsScreen(
         if (isSynced && activeIndex >= 0) listState.animateScrollToItem((activeIndex - 2).coerceAtLeast(0))
     }
 
+    fun doSearch() {
+        searching = true
+        candidates = emptyList()
+        scope.launch {
+            val res = runCatching {
+                lyricsRepository.searchByQuery(searchArtist.trim(), searchTitle.trim(), searchSyncedOnly)
+            }.getOrElse { emptyList() }
+            candidates = res
+            searching = false
+            AppLogger.i(TAG, "manual search: '${searchArtist.trim()} / ${searchTitle.trim()}' -> ${res.size}")
+        }
+    }
+
+    fun applyCandidate(c: LyricsCandidate) {
+        val t = track ?: return
+        scope.launch {
+            lyricsRepository.cacheLyrics(t, c.content, c.synced)
+            applyContent(c.content)
+            searchOpen = false
+            Toast.makeText(context, if (c.synced) "Синхротекст применён" else "Текст применён (plain)", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .statusBarsPadding()
             .background(Brush.verticalGradient(listOf(theme.backgroundTop, theme.backgroundBottom)))
     ) {
         Row(
@@ -235,8 +275,8 @@ fun LyricsScreen(
                 Text("Текст песни", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 if (!isLoading) {
                     val mode = when {
-                        pcSyncing -> "синхронизация через ПК..."
-                        isAligning -> "создание таймкодов..."
+                        pcSyncing -> "сервер выравнивает..."
+                        searching -> "поиск..."
                         isSynced -> "караоке"
                         lyricLines != null -> "прокрутка вручную"
                         else -> ""
@@ -245,7 +285,7 @@ fun LyricsScreen(
                     if (mode.isNotEmpty()) Text("$src · $mode", color = theme.accent.copy(alpha = 0.6f), fontSize = 11.sp)
                 }
             }
-            if (pcSyncing || isAligning) CircularProgressIndicator(color = theme.accent, modifier = Modifier.width(20.dp).height(20.dp))
+            if (pcSyncing || searching) CircularProgressIndicator(color = theme.accent, modifier = Modifier.width(20.dp).height(20.dp))
             Box {
                 IconButton(onClick = { menuExpanded = true }) {
                     Icon(Icons.Default.MoreVert, "Действия", tint = Color.White)
@@ -256,24 +296,31 @@ fun LyricsScreen(
                     modifier = Modifier.background(theme.backgroundBottom)
                 ) {
                     DropdownMenuItem(
-                        text = { Text("Найти текст в сети", color = Color.White) },
-                        leadingIcon = { Icon(Icons.Default.Refresh, null, tint = theme.accent) },
-                        onClick = { menuExpanded = false; scope.launch { loadLyrics(forceRefresh = true) } }
+                        text = { Text("Найти текст (вручную)", color = Color.White) },
+                        leadingIcon = { Icon(Icons.Default.Search, null, tint = theme.accent) },
+                        onClick = { menuExpanded = false; openSearch() }
                     )
                     DropdownMenuItem(
-                        text = { Text("Синхронизировать через ПК", color = Color.White) },
-                        enabled = !pcSyncing && rawContent != null && !isSynced,
+                        text = { Text("Вставить свой текст", color = Color.White) },
+                        leadingIcon = { Icon(Icons.Default.ContentPaste, null, tint = theme.accent) },
                         onClick = {
                             menuExpanded = false
-                            if (PcSync.host(context).isBlank()) {
-                                hostInput = ""
-                                autoSyncInput = PcSync.enabled(context)
-                                hostDialog = true
-                            } else runPcSync(showToast = true)
+                            pasteText = rawContent ?: ""
+                            pasteDialog = true
                         }
                     )
                     DropdownMenuItem(
-                        text = { Text("Настроить ПК-синхронизацию", color = Color.White) },
+                        text = { Text("Синхронизировать через сервер", color = Color.White) },
+                        leadingIcon = { Icon(Icons.Default.Sync, null, tint = theme.accent) },
+                        enabled = !pcSyncing && rawContent != null && !isSynced,
+                        onClick = {
+                            menuExpanded = false
+                            runPcSync(showToast = true)
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Настройки синхронизации", color = Color.White) },
+                        leadingIcon = { Icon(Icons.Default.Settings, null, tint = theme.accent) },
                         onClick = {
                             menuExpanded = false
                             hostInput = PcSync.host(context)
@@ -281,59 +328,15 @@ fun LyricsScreen(
                             hostDialog = true
                         }
                     )
-                    DropdownMenuItem(
-                        text = { Text("Создать таймкоды (на устройстве)", color = Color.White) },
-                        enabled = !isAligning && rawContent != null && !isSynced,
-                        onClick = {
-                            menuExpanded = false
-                            val t = track ?: return@DropdownMenuItem
-                            val plain = rawContent ?: return@DropdownMenuItem
-                            isAligning = true
-                            scope.launch {
-                                val lrc = OnDeviceAligner.alignPlainToTimed(t, plain.lines())
-                                isAligning = false
-                                if (lrc != null) { lyricsRepository.cacheLyrics(t, lrc, true); applyContent(lrc) }
-                                else Toast.makeText(context, "Не удалось создать таймкоды", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text(if (isEmbedding) "Встраивание..." else "Встроить в песню", color = Color.White) },
-                        enabled = !isEmbedding && rawContent != null,
-                        onClick = {
-                            menuExpanded = false
-                            val t = track ?: return@DropdownMenuItem
-                            val content = lyricsRepository.getCachedLyrics(t) ?: rawContent ?: return@DropdownMenuItem
-                            isEmbedding = true
-                            scope.launch {
-                                val synced = content.contains(LRC_REGEX)
-                                val r = lyricsRepository.embedInFile(t, content, synced)
-                                isEmbedding = false
-                                when {
-                                    r.success -> Toast.makeText(context, "Текст встроен", Toast.LENGTH_SHORT).show()
-                                    r.needsPermission && r.intentSender != null -> {
-                                        pendingEmbedTrack = t; pendingEmbedContent = content
-                                        runCatching { writeLauncher.launch(IntentSenderRequest.Builder(r.intentSender).build()) }
-                                    }
-                                    else -> Toast.makeText(context, r.error ?: "Не удалось встроить", Toast.LENGTH_LONG).show()
-                                }
-                            }
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Текст раньше на 0.5 с", color = Color.White) },
-                        onClick = { val t = track ?: return@DropdownMenuItem; lyricsOffset -= 500; scope.launch { offsetStore.setOffset(t.id, lyricsOffset) } }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Текст позже на 0.5 с", color = Color.White) },
-                        onClick = { val t = track ?: return@DropdownMenuItem; lyricsOffset += 500; scope.launch { offsetStore.setOffset(t.id, lyricsOffset) } }
-                    )
                 }
             }
         }
 
-        if (track != null && !isLoading && !notFound) {
-            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        if (track != null && !isLoading && !notFound && !searchOpen) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
                 Text(track.title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
                 Text(track.artist, color = Color.White.copy(alpha = 0.6f), fontSize = 14.sp, textAlign = TextAlign.Center)
             }
@@ -341,24 +344,103 @@ fun LyricsScreen(
 
         Box(modifier = Modifier.weight(1f)) {
             when {
-                isLoading || pcSyncing || isAligning -> {
+                isLoading || pcSyncing -> {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             CircularProgressIndicator(color = theme.accent, modifier = Modifier.width(40.dp).height(40.dp))
                             Spacer(Modifier.height(16.dp))
                             Text(
-                                when { pcSyncing -> "ПК выравнивает текст..."; isAligning -> "Создаём таймкоды..."; else -> "Ищем текст..." },
+                                if (pcSyncing) "Сервер выравнивает текст..." else "Загрузка текста...",
                                 color = Color.White.copy(alpha = 0.5f), fontSize = 15.sp
                             )
                         }
                     }
                 }
+                searchOpen -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 16.dp)
+                    ) {
+                        TextField(
+                            value = searchArtist,
+                            onValueChange = { searchArtist = it },
+                            singleLine = true,
+                            placeholder = { Text("Исполнитель", color = Color.White.copy(alpha = 0.4f)) },
+                            colors = TextFieldDefaults.colors(
+                                focusedTextColor = Color.White, unfocusedTextColor = Color.White,
+                                focusedContainerColor = Color.White.copy(alpha = 0.08f),
+                                unfocusedContainerColor = Color.White.copy(alpha = 0.06f),
+                                focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        TextField(
+                            value = searchTitle,
+                            onValueChange = { searchTitle = it },
+                            singleLine = true,
+                            placeholder = { Text("Название", color = Color.White.copy(alpha = 0.4f)) },
+                            colors = TextFieldDefaults.colors(
+                                focusedTextColor = Color.White, unfocusedTextColor = Color.White,
+                                focusedContainerColor = Color.White.copy(alpha = 0.08f),
+                                unfocusedContainerColor = Color.White.copy(alpha = 0.06f),
+                                focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = searchSyncedOnly, onCheckedChange = { searchSyncedOnly = it })
+                            Text("Только с таймкодами", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(onClick = { doSearch() }, enabled = !searching) {
+                                Text("НАЙТИ", color = theme.accent)
+                            }
+                            if (searching) CircularProgressIndicator(color = theme.accent, modifier = Modifier.width(18.dp).height(18.dp))
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        candidates.forEach { c ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp)
+                                    .background(Color.White.copy(alpha = 0.07f))
+                                    .clickable { applyCandidate(c) }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("${c.artist} — ${c.title}", color = Color.White, fontSize = 13.sp, maxLines = 2)
+                                }
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    if (c.synced) "SYNCED" else c.source,
+                                    color = if (c.synced) theme.accent else Color.White.copy(alpha = 0.5f),
+                                    fontSize = 10.sp, fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                        if (candidates.isEmpty() && !searching) {
+                            Text(
+                                "Ничего не найдено. Проверь запрос или вставь свой текст через меню.",
+                                color = Color.White.copy(alpha = 0.45f), fontSize = 12.sp,
+                                modifier = Modifier.padding(vertical = 12.dp)
+                            )
+                        }
+                        Spacer(Modifier.height(24.dp))
+                    }
+                }
                 notFound -> {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("Текст не найден", color = Color(0xFFFF8A80), fontSize = 16.sp, textAlign = TextAlign.Center, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(16.dp))
-                            TextButton(onClick = { scope.launch { loadLyrics(forceRefresh = true) } }) { Text("Повторить", color = theme.accent) }
+                            Text("Текст не найден", color = Color(0xFFFF8A80), fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.height(12.dp))
+                            TextButton(onClick = { openSearch() }) { Text("Найти вручную", color = theme.accent) }
+                            TextButton(onClick = { pasteText = ""; pasteDialog = true }) { Text("Вставить свой текст", color = theme.accent) }
                         }
                     }
                 }
@@ -397,20 +479,66 @@ fun LyricsScreen(
         }
     }
 
-    // Диалог настройки ПК-синхронизации
+    if (pasteDialog) {
+        AlertDialog(
+            onDismissRequest = { pasteDialog = false },
+            title = { Text("Вставить свой текст", color = Color.White) },
+            text = {
+                TextField(
+                    value = pasteText,
+                    onValueChange = { pasteText = it },
+                    minLines = 6,
+                    maxLines = 10,
+                    placeholder = { Text("Строки текста (или LRC с [mm:ss.xx])", color = Color.White.copy(alpha = 0.4f)) },
+                    colors = TextFieldDefaults.colors(
+                        focusedTextColor = Color.White, unfocusedTextColor = Color.White,
+                        focusedContainerColor = Color.White.copy(alpha = 0.08f),
+                        unfocusedContainerColor = Color.White.copy(alpha = 0.06f),
+                        focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    pasteDialog = false
+                    val t = track ?: return@TextButton
+                    if (pasteText.isBlank()) {
+                        Toast.makeText(context, "Пустой текст", Toast.LENGTH_SHORT).show()
+                        return@TextButton
+                    }
+                    val synced = pasteText.contains(LRC_REGEX)
+                    scope.launch { lyricsRepository.cacheLyrics(t, pasteText, synced) }
+                    applyContent(pasteText)
+                    searchOpen = false
+                    Toast.makeText(
+                        context,
+                        if (synced) "Текст с таймкодами применён" else "Текст вставлен: можно синхронизировать",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    if (!synced && PcSync.enabled(context)) runPcSync(showToast = true)
+                }) { Text("Применить", color = theme.accent) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pasteDialog = false }) { Text("Отмена", color = Color.White.copy(alpha = 0.7f)) }
+            },
+            containerColor = Color(0xFF171021)
+        )
+    }
+
     if (hostDialog) {
         AlertDialog(
             onDismissRequest = { hostDialog = false },
-            title = { Text("ПК-синхронизация", color = Color.White) },
+            title = { Text("Синхронизация текстов", color = Color.White) },
             text = {
                 Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                    Text("Адрес сервера на ПК (http://IP:8787):", color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp)
+                    Text("Свой сервер (пусто = публичный):", color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp)
                     Spacer(Modifier.height(6.dp))
                     TextField(
                         value = hostInput,
                         onValueChange = { hostInput = it },
-                        placeholder = { Text("http://192.168.0.10:8787", color = Color.White.copy(alpha = 0.4f)) },
                         singleLine = true,
+                        placeholder = { Text(CoolDb.PUBLIC_BASE, color = Color.White.copy(alpha = 0.4f)) },
                         colors = TextFieldDefaults.colors(
                             focusedTextColor = Color.White, unfocusedTextColor = Color.White,
                             focusedContainerColor = Color.White.copy(alpha = 0.08f),
@@ -433,12 +561,14 @@ fun LyricsScreen(
                     hostDialog = false
                     scope.launch {
                         val ok = PcSync.ping(context)
-                        Toast.makeText(context, if (ok) "ПК доступен" else "ПК не доступен — проверь адрес/фаервол", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, if (ok) "Сервер доступен" else "Сервер не доступен", Toast.LENGTH_SHORT).show()
                         if (ok && rawContent != null && rawContent?.contains(LRC_REGEX) == false) runPcSync(showToast = true)
                     }
                 }) { Text("Сохранить", color = theme.accent) }
             },
-            dismissButton = { TextButton(onClick = { hostDialog = false }) { Text("Отмена", color = Color.White.copy(alpha = 0.7f)) } },
+            dismissButton = {
+                TextButton(onClick = { hostDialog = false }) { Text("Отмена", color = Color.White.copy(alpha = 0.7f)) }
+            },
             containerColor = Color(0xFF171021)
         )
     }
