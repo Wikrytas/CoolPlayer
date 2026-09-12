@@ -1,4 +1,4 @@
-﻿package com.wikrytas.coolplayer.ui.screens
+package com.wikrytas.coolplayer.ui.screens
 
 import android.app.Activity
 import android.content.res.Configuration
@@ -39,12 +39,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.automirrored.filled.TextSnippet
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -72,8 +71,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.media3.common.Player
-import com.wikrytas.coolplayer.audio.EqualizerController
+import com.wikrytas.coolplayer.data.AppLogger
 import com.wikrytas.coolplayer.data.AppSettings
 import com.wikrytas.coolplayer.data.LyricsOffsetStore
 import com.wikrytas.coolplayer.data.LyricsRepository
@@ -91,7 +89,7 @@ import com.wikrytas.coolplayer.ui.components.player.Pressable
 import com.wikrytas.coolplayer.ui.theme.PlayerTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import com.wikrytas.coolplayer.data.AppLogger
+import androidx.compose.material3.TextButton
 
 private const val TAG = "Player"
 
@@ -111,18 +109,19 @@ fun PlayerScreen(
     lyricsRepository: LyricsRepository,
     onToggleFavorite: (Long) -> Unit,
     onOpenLibrary: () -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onOpenLyrics: () -> Unit = {},
+    onLibraryChanged: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-
     val themeRepository = remember { ThemeRepository(context.applicationContext) }
     val appSettings by themeRepository.settings.collectAsStateWithLifecycle(initialValue = AppSettings())
     val offsetStore = remember { LyricsOffsetStore(context.applicationContext) }
-
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+
     var showLyricsInsteadOfCover by remember { mutableStateOf(false) }
     var lyricsMenuExpanded by remember { mutableStateOf(false) }
     var lyricsRefreshKey by remember { mutableIntStateOf(0) }
@@ -133,6 +132,60 @@ fun PlayerScreen(
     var pendingEmbedContent by remember { mutableStateOf<String?>(null) }
     var verticalDrag by remember { mutableFloatStateOf(0f) }
 
+    var deleteConfirm by remember { mutableStateOf<Track?>(null) }
+    var pendingDeleteUri by remember { mutableStateOf<android.net.Uri?>(null) }
+
+    val deleteLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        val uri = pendingDeleteUri
+        pendingDeleteUri = null
+        if (result.resultCode == Activity.RESULT_OK && uri != null) {
+            scope.launch {
+                val removed = runCatching { context.contentResolver.delete(uri, null, null) }.getOrDefault(0)
+                AppLogger.i(TAG, "delete after system grant: removed=$removed")
+                Toast.makeText(context, "Трек удалён с устройства", Toast.LENGTH_SHORT).show()
+                if (state.selectedTrack?.uri == uri) viewModel.next()
+                onLibraryChanged()
+            }
+        } else {
+            Toast.makeText(context, "Удаление отменено", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun deleteFromDevice(track: Track) {
+        scope.launch {
+            try {
+                val removed = context.contentResolver.delete(track.uri, null, null)
+                if (removed > 0) {
+                    AppLogger.i(TAG, "deleted from device: id=${track.id}")
+                    Toast.makeText(context, "Трек удалён с устройства", Toast.LENGTH_SHORT).show()
+                    if (state.selectedTrack?.id == track.id) viewModel.next()
+                    onLibraryChanged()
+                } else {
+                    Toast.makeText(context, "Не удалось удалить файл", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: SecurityException) {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                    runCatching {
+                        val pi = android.provider.MediaStore.createDeleteRequest(
+                            context.contentResolver, listOf(track.uri)
+                        )
+                        pendingDeleteUri = track.uri
+                        deleteLauncher.launch(IntentSenderRequest.Builder(pi.intentSender).build())
+                    }.onFailure {
+                        Toast.makeText(context, "Не удалось запросить удаление", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    Toast.makeText(context, "Нет прав на удаление файла", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                AppLogger.e(TAG, "delete failed: id=${track.id}", e)
+                Toast.makeText(context, "Ошибка удаления", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     LaunchedEffect(isLandscape) {
         AppLogger.d(TAG, "orientation: ${if (isLandscape) "landscape" else "portrait"}")
     }
@@ -140,7 +193,7 @@ fun PlayerScreen(
     LaunchedEffect(state.selectedTrack?.id) {
         val t = state.selectedTrack ?: return@LaunchedEffect
         lyricsOffset = offsetStore.getOffset(t.id)
-        delay(400) // дебаунс: не дёргаем сеть при частых переключениях
+        delay(400)
         rawLyricsContent = lyricsRepository.resolveLyrics(t, useOnline = appSettings.autoLyricsOnline)
     }
 
@@ -155,6 +208,11 @@ fun PlayerScreen(
                 isEmbedding = true
                 val success = lyricsRepository.retryEmbedWithPermission(t, content)
                 isEmbedding = false
+                if (success) {
+                    val synced = content.contains(Regex("\\[\\d{2}:\\d{2}"))
+                    lyricsRepository.cacheLyrics(t, content, synced)
+                    rawLyricsContent = content
+                }
                 Toast.makeText(
                     context,
                     if (success) "✅ Текст встроен в файл" else "❌ Не удалось встроить",
@@ -169,23 +227,29 @@ fun PlayerScreen(
     val accent by animateColorAsState(theme.accent, label = "accent")
     val color1 by animateColorAsState(theme.backgroundTop, label = "bg1")
     val color2 by animateColorAsState(theme.backgroundBottom, label = "bg2")
-
     val isFavorite = state.selectedTrack?.id?.let { favorites.contains(it) } ?: false
 
     fun tryEmbed() {
         val t = state.selectedTrack ?: return
-        val content = rawLyricsContent ?: run {
-            Toast.makeText(context, "Текст не найден", Toast.LENGTH_SHORT).show()
-            return
-        }
-        AppLogger.i(TAG, "embed requested: id=${t.id}, len=${content.length}")
+        val content = lyricsRepository.getCachedLyrics(t)
+            ?: rawLyricsContent
+            ?: run {
+                AppLogger.w(TAG, "embed abort: no cached/raw lyrics for id=${t.id}")
+                Toast.makeText(context, "Текст не найден", Toast.LENGTH_SHORT).show()
+                return
+            }
+        val synced = content.contains(Regex("\\[\\d{2}:\\d{2}"))
+        AppLogger.i(TAG, "embed requested: id=${t.id}, len=${content.length}, synced=$synced")
         isEmbedding = true
         scope.launch {
-            val result = lyricsRepository.embedInFile(t, content, true)
+            val result = lyricsRepository.embedInFile(t, content, synced)
             isEmbedding = false
             when {
-                result.success ->
+                result.success -> {
+                    lyricsRepository.cacheLyrics(t, content, synced)
+                    rawLyricsContent = content
                     Toast.makeText(context, "✅ Текст встроен в файл", Toast.LENGTH_SHORT).show()
+                }
                 result.needsPermission && result.intentSender != null -> {
                     AppLogger.w(TAG, "embed needs SAF permission: id=${t.id}")
                     pendingEmbedTrack = t
@@ -202,14 +266,6 @@ fun PlayerScreen(
         }
     }
 
-    fun changeOffset(delta: Long) {
-        val t = state.selectedTrack ?: return
-        val newOffset = (lyricsOffset + delta).coerceIn(-10_000L, 10_000L)
-        lyricsOffset = newOffset
-        AppLogger.d(TAG, "lyrics offset: ${newOffset}ms (delta ${delta}ms)")
-        scope.launch { offsetStore.setOffset(t.id, newOffset) }
-    }
-
     val headerBlock: @Composable () -> Unit = {
         Box(
             modifier = Modifier
@@ -224,13 +280,27 @@ fun PlayerScreen(
                     modifier = Modifier.size(28.dp)
                 )
             }
-            Pressable(onClick = onOpenSettings, modifier = Modifier.align(Alignment.CenterEnd).size(40.dp)) {
-                Icon(
-                    Icons.Default.Settings,
-                    contentDescription = "Настройки",
-                    tint = Color.White.copy(alpha = 0.9f),
-                    modifier = Modifier.size(22.dp)
-                )
+            // Кнопка текста + шестерёнка справа
+            Row(
+                modifier = Modifier.align(Alignment.CenterEnd),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Pressable(onClick = onOpenLyrics, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.TextSnippet,
+                        contentDescription = "Открыть текст песни",
+                        tint = Color.White.copy(alpha = 0.9f),
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                Pressable(onClick = onOpenSettings, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        Icons.Default.Settings,
+                        contentDescription = "Настройки",
+                        tint = Color.White.copy(alpha = 0.9f),
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
             }
         }
     }
@@ -247,10 +317,7 @@ fun PlayerScreen(
                         var acc = 0f
                         var consumed = false
                         detectHorizontalDragGestures(
-                            onDragStart = {
-                                acc = 0f
-                                consumed = false
-                            },
+                            onDragStart = { acc = 0f; consumed = false },
                             onDragEnd = { consumed = false },
                             onDragCancel = { consumed = false }
                         ) { change, dragAmount ->
@@ -258,16 +325,8 @@ fun PlayerScreen(
                             acc += dragAmount
                             if (!consumed) {
                                 when {
-                                    acc < -120f -> {
-                                        consumed = true
-                                        AppLogger.d(TAG, "swipe next (gesture)")
-                                        viewModel.next()
-                                    }
-                                    acc > 120f -> {
-                                        consumed = true
-                                        AppLogger.d(TAG, "swipe previous (gesture)")
-                                        viewModel.previous()
-                                    }
+                                    acc < -120f -> { consumed = true; viewModel.next() }
+                                    acc > 120f -> { consumed = true; viewModel.previous() }
                                 }
                             }
                         }
@@ -275,7 +334,6 @@ fun PlayerScreen(
                     .combinedClickable(
                         onClick = {
                             showLyricsInsteadOfCover = !showLyricsInsteadOfCover
-                            AppLogger.d(TAG, "cover tap: ${if (showLyricsInsteadOfCover) "lyrics shown" else "cover shown"}")
                         },
                         onLongClick = { lyricsMenuExpanded = true }
                     ),
@@ -290,6 +348,7 @@ fun PlayerScreen(
                         refreshKey = lyricsRefreshKey,
                         onlineEnabled = appSettings.autoLyricsOnline,
                         offsetMs = lyricsOffset,
+                        onContentApplied = { content -> rawLyricsContent = content },
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
@@ -299,7 +358,8 @@ fun PlayerScreen(
                             .fillMaxSize()
                             .shadow(28.dp, RoundedCornerShape(20.dp), spotColor = Color.Black.copy(alpha = 0.6f))
                             .clip(RoundedCornerShape(20.dp)),
-                        shape = RoundedCornerShape(20.dp)
+                        shape = RoundedCornerShape(20.dp),
+                        theme = theme
                     )
                 }
             }
@@ -311,7 +371,19 @@ fun PlayerScreen(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.weight(1f)) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .combinedClickable(
+                        onClick = { },
+                        onLongClick = {
+                            state.selectedTrack?.let { t ->
+                                AppLogger.w(TAG, "long-press meta: delete confirm id=${t.id}")
+                                deleteConfirm = t
+                            }
+                        }
+                    )
+            ) {
                 Text(
                     text = state.selectedTrack?.title ?: "Выберите трек",
                     fontSize = 20.sp, fontWeight = FontWeight.Bold, fontStyle = FontStyle.Normal,
@@ -358,10 +430,7 @@ fun PlayerScreen(
                     positionMs = state.position,
                     durationMs = state.duration,
                     accent = accent,
-                    onSeekStart = {
-                        AppLogger.d(TAG, "seek start")
-                        viewModel.startSeek()
-                    },
+                    onSeekStart = { viewModel.startSeek() },
                     onSeek = { viewModel.seekToPosition(it) },
                     onSeekEnd = { viewModel.finishSeek(it) },
                     modifier = Modifier.fillMaxWidth()
@@ -391,11 +460,7 @@ fun PlayerScreen(
     }
 
     val visualizerBlock: @Composable (Modifier) -> Unit = { mod ->
-        AuroraVisualizer(
-            isPlaying = state.isPlaying,
-            accent = accent,
-            modifier = mod
-        )
+        AuroraVisualizer(isPlaying = state.isPlaying, accent = accent, modifier = mod)
     }
 
     Box(
@@ -405,10 +470,7 @@ fun PlayerScreen(
                 detectVerticalDragGestures(
                     onDragStart = { verticalDrag = 0f },
                     onDragEnd = {
-                        if (verticalDrag > 120f) {
-                            AppLogger.d(TAG, "swipe down -> library")
-                            onOpenLibrary()
-                        }
+                        if (verticalDrag > 120f) onOpenLibrary()
                         verticalDrag = 0f
                     },
                     onDragCancel = { verticalDrag = 0f }
@@ -419,36 +481,24 @@ fun PlayerScreen(
             }
     ) {
         FlowingThemeBackground(top = color1, bottom = color2, accent = accent)
-
         if (isLandscape) {
             Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .statusBarsPadding()
-                    .navigationBarsPadding()
+                modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
             ) {
                 headerBlock()
                 Row(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp),
+                    modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     BoxWithConstraints(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight(),
+                        modifier = Modifier.weight(1f).fillMaxHeight(),
                         contentAlignment = Alignment.Center
                     ) {
                         val s = maxWidth.coerceAtMost(maxHeight * 0.95f)
                         coverBlock(Modifier.size(s))
                     }
                     Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight()
-                            .padding(start = 12.dp),
+                        modifier = Modifier.weight(1f).fillMaxHeight().padding(start = 12.dp),
                         verticalArrangement = Arrangement.Center
                     ) {
                         visualizerBlock(Modifier.fillMaxWidth().height(36.dp))
@@ -464,61 +514,36 @@ fun PlayerScreen(
             }
         } else {
             Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .statusBarsPadding()
-                    .navigationBarsPadding()
+                modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
             ) {
                 headerBlock()
-
                 Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
                     coverBlock(Modifier.fillMaxWidth(0.74f).aspectRatio(1f))
                 }
-
                 visualizerBlock(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(72.dp)
-                        .padding(horizontal = 12.dp)
+                    Modifier.fillMaxWidth().height(72.dp).padding(horizontal = 12.dp)
                 )
-
                 Spacer(Modifier.height(4.dp))
-
-                Column(Modifier.padding(horizontal = 24.dp)) {
-                    metaBlock()
-                }
-
+                Column(Modifier.padding(horizontal = 24.dp)) { metaBlock() }
                 Spacer(Modifier.height(10.dp))
-
                 AnimatedVisibility(
-                    visible = false, // EQ-панель открывается из настроек; на плеере не дублируем
+                    visible = false,
                     enter = expandVertically(expandFrom = Alignment.Bottom) + fadeIn(),
                     exit = shrinkVertically(shrinkTowards = Alignment.Bottom) + fadeOut(),
                     modifier = Modifier.padding(horizontal = 24.dp)
-                ) {
-                    EqPanel(accent = accent)
-                }
-
-                Column(Modifier.padding(horizontal = 24.dp)) {
-                    seekBlock()
-                }
-
+                ) { EqPanel(accent = accent) }
+                Column(Modifier.padding(horizontal = 24.dp)) { seekBlock() }
                 Spacer(Modifier.height(16.dp))
-
-                Column(Modifier.padding(horizontal = 28.dp)) {
-                    controlsBlock()
-                }
-
+                Column(Modifier.padding(horizontal = 28.dp)) { controlsBlock() }
                 Spacer(Modifier.height(16.dp))
             }
         }
 
+        // ДОЛГОЕ НАЖАТИЕ НА ОБЛОЖКЕ: только встроить + автопоиск
         DropdownMenu(
             expanded = lyricsMenuExpanded,
             onDismissRequest = { lyricsMenuExpanded = false },
@@ -529,26 +554,6 @@ fun PlayerScreen(
                 leadingIcon = { Icon(Icons.Default.Save, null, tint = accent) },
                 enabled = !isEmbedding && rawLyricsContent != null,
                 onClick = { lyricsMenuExpanded = false; tryEmbed() }
-            )
-            DropdownMenuItem(
-                text = { Text("Найти текст в сети", color = Color.White) },
-                leadingIcon = { Icon(Icons.Default.Refresh, null, tint = accent) },
-                onClick = {
-                    lyricsMenuExpanded = false
-                    val t = state.selectedTrack ?: return@DropdownMenuItem
-                    AppLogger.i(TAG, "menu: force lyrics search id=${t.id}")
-                    scope.launch {
-                        lyricsRepository.clearCache(t)
-                        val content = lyricsRepository.resolveLyrics(t, forceOnline = true, useOnline = true)
-                        rawLyricsContent = content
-                        lyricsRefreshKey++
-                        Toast.makeText(
-                            context,
-                            if (content != null) "✅ Текст найден" else "❌ Текст не найден в сети",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                }
             )
             DropdownMenuItem(
                 text = {
@@ -564,24 +569,30 @@ fun PlayerScreen(
                     scope.launch { themeRepository.saveAutoLyricsOnline(next) }
                 }
             )
-            HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
-            DropdownMenuItem(
-                text = { Text("Синхронизация: ${if (lyricsOffset >= 0) "+" else ""}$lyricsOffset мс (сброс)", color = Color.White.copy(alpha = 0.7f)) },
-                onClick = {
-                    lyricsMenuExpanded = false
-                    val t = state.selectedTrack ?: return@DropdownMenuItem
-                    lyricsOffset = 0L
-                    AppLogger.d(TAG, "lyrics offset reset: id=${t.id}")
-                    scope.launch { offsetStore.setOffset(t.id, 0L) }
-                }
-            )
-            DropdownMenuItem(
-                text = { Text("Текст раньше на 0.5 с", color = Color.White) },
-                onClick = { changeOffset(-500L) }
-            )
-            DropdownMenuItem(
-                text = { Text("Текст позже на 0.5 с", color = Color.White) },
-                onClick = { changeOffset(+500L) }
+        }
+
+        deleteConfirm?.let { t ->
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { deleteConfirm = null },
+                title = { Text("Удалить трек с устройства?", color = Color.White) },
+                text = {
+                    Text(
+                        "«${t.title}» будет удалён безвозвратно вместе с файлом.",
+                        color = Color.White.copy(alpha = 0.7f)
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        deleteConfirm = null
+                        deleteFromDevice(t)
+                    }) { Text("Удалить", color = Color(0xFFFF5252)) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { deleteConfirm = null }) {
+                        Text("Отмена", color = Color.White.copy(alpha = 0.7f))
+                    }
+                },
+                containerColor = Color(0xFF171021)
             )
         }
     }

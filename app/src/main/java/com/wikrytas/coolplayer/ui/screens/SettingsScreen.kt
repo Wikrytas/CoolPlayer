@@ -1,4 +1,4 @@
-﻿package com.wikrytas.coolplayer.ui.screens
+package com.wikrytas.coolplayer.ui.screens
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
@@ -20,7 +20,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Visibility
@@ -54,11 +54,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wikrytas.coolplayer.audio.EqualizerController
 import com.wikrytas.coolplayer.data.AppLogger
 import com.wikrytas.coolplayer.data.AppSettings
+import com.wikrytas.coolplayer.data.LibraryPrefs
 import com.wikrytas.coolplayer.data.ThemeRepository
 import com.wikrytas.coolplayer.models.Track
 import com.wikrytas.coolplayer.ui.PlayerViewModel
 import com.wikrytas.coolplayer.ui.PlaybackSpeed
 import com.wikrytas.coolplayer.ui.SleepMode
+import com.wikrytas.coolplayer.ui.components.AppUpdateCard
 import com.wikrytas.coolplayer.ui.components.EqualizerPanel
 import com.wikrytas.coolplayer.ui.theme.PlayerTheme
 import com.wikrytas.coolplayer.ui.theme.PlayerThemes
@@ -75,12 +77,13 @@ fun SettingsScreen(
     onOpenLog: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    val repo = remember { ThemeRepository(context.applicationContext) }
+    val appContext = context.applicationContext
+    val repo = remember { ThemeRepository(appContext) }
     val scope = rememberCoroutineScope()
-
     val settings by repo.settings.collectAsStateWithLifecycle(initialValue = AppSettings())
     val playerState by playerViewModel.uiState.collectAsStateWithLifecycle()
     var selectedTab by remember { mutableStateOf(0) }
+    var autoScroll by remember { mutableStateOf(LibraryPrefs.autoScrollEnabled(appContext)) }
 
     val color1 by animateColorAsState(theme.backgroundTop, label = "s1")
     val color2 by animateColorAsState(theme.backgroundBottom, label = "s2")
@@ -97,7 +100,6 @@ fun SettingsScreen(
             .statusBarsPadding()
             .navigationBarsPadding()
     ) {
-        // ── ШАПКА ──
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -105,7 +107,7 @@ fun SettingsScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onBack) {
-                Icon(Icons.Default.ArrowBack, "Назад", tint = Color.White)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад", tint = Color.White)
             }
             Text(
                 "Настройки",
@@ -116,7 +118,6 @@ fun SettingsScreen(
             )
         }
 
-        // ── ТАБЫ ──
         TabRow(
             selectedTabIndex = selectedTab,
             containerColor = Color.Transparent,
@@ -149,7 +150,6 @@ fun SettingsScreen(
                     .verticalScroll(rememberScrollState())
                     .padding(horizontal = 20.dp, vertical = 16.dp)
             ) {
-                // ── СЕКЦИЯ ПЛЕЕР ──
                 Text(
                     "ПЛЕЕР",
                     color = accent,
@@ -159,7 +159,6 @@ fun SettingsScreen(
                     fontStyle = FontStyle.Normal
                 )
                 Spacer(Modifier.height(8.dp))
-
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -199,9 +198,7 @@ fun SettingsScreen(
                             .padding(horizontal = 12.dp, vertical = 6.dp)
                     )
                 }
-
                 Spacer(Modifier.height(8.dp))
-
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -233,10 +230,35 @@ fun SettingsScreen(
                             .padding(horizontal = 12.dp, vertical = 6.dp)
                     )
                 }
-
                 Spacer(Modifier.height(8.dp))
-
-                // ── ЛОГ ПРИЛОЖЕНИЯ ──
+                // Автофокус в библиотеке
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color.White.copy(alpha = 0.06f))
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Автофокус в библиотеке", color = Color.White, fontSize = 15.sp, fontStyle = FontStyle.Normal)
+                        Text(
+                            "При входе подсвечивать текущий трек",
+                            color = Color.White.copy(alpha = 0.5f),
+                            fontSize = 11.sp,
+                            fontStyle = FontStyle.Normal
+                        )
+                    }
+                    Switch(
+                        checked = autoScroll,
+                        onCheckedChange = { enabled ->
+                            autoScroll = enabled
+                            LibraryPrefs.setAutoScrollEnabled(appContext, enabled)
+                        },
+                        colors = SwitchDefaults.colors(checkedTrackColor = accent)
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -273,8 +295,18 @@ fun SettingsScreen(
                 }
 
                 Spacer(Modifier.height(24.dp))
+                Text(
+                    "ОБНОВЛЕНИЕ ПРИЛОЖЕНИЯ",
+                    color = accent,
+                    fontSize = 12.sp,
+                    letterSpacing = 3.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontStyle = FontStyle.Normal
+                )
+                Spacer(Modifier.height(8.dp))
+                AppUpdateCard(theme = theme)
 
-                // ── СЕКЦИЯ ТЕМЫ ──
+                Spacer(Modifier.height(24.dp))
                 Text(
                     "ТЕМА",
                     color = accent,
@@ -284,7 +316,6 @@ fun SettingsScreen(
                     fontStyle = FontStyle.Normal
                 )
                 Spacer(Modifier.height(8.dp))
-
                 PlayerThemes.all.forEach { t ->
                     Row(
                         modifier = Modifier
@@ -320,9 +351,7 @@ fun SettingsScreen(
                         }
                     }
                 }
-
                 Spacer(Modifier.height(16.dp))
-
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -350,7 +379,6 @@ fun SettingsScreen(
                     )
                 }
 
-                // ── СЕКЦИЯ СКРЫТЫЕ ТРЕКИ ──
                 if (hiddenTracks.isNotEmpty()) {
                     Spacer(Modifier.height(24.dp))
                     Text(
@@ -362,7 +390,6 @@ fun SettingsScreen(
                         fontStyle = FontStyle.Normal
                     )
                     Spacer(Modifier.height(8.dp))
-
                     hiddenTracks.forEach { track ->
                         Row(
                             modifier = Modifier
@@ -407,7 +434,6 @@ fun SettingsScreen(
                 }
 
                 Spacer(Modifier.height(32.dp))
-
                 Text(
                     "Версия 1.0 • CoolPlayer",
                     color = Color.White.copy(alpha = 0.4f),
@@ -419,7 +445,6 @@ fun SettingsScreen(
                 )
                 Spacer(Modifier.height(24.dp))
             }
-
             1 -> Column(
                 modifier = Modifier
                     .fillMaxSize()

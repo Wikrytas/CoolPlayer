@@ -1,7 +1,9 @@
 ﻿package com.wikrytas.coolplayer.ui.components.player
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -17,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -30,8 +33,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -39,16 +40,43 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.wikrytas.coolplayer.audio.EqualizerController
 import com.wikrytas.coolplayer.audio.EqPreset
+import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
-/** Панель эквалайзера: пресеты-чипы + слайдеры полос. */
+/**
+ * Панель эквалайзера: пресеты-чипы (скролл, всё влезает) + слайдеры полос.
+ * currentPreset — сохранённый пресет (применяется, когда эффект готов),
+ * onPreset — колбэк для сохранения выбора в настройки.
+ */
 @Composable
-fun EqPanel(accent: Color) {
-    var activePreset by remember { mutableStateOf(EqPreset.FLAT) }
+fun EqPanel(
+    accent: Color,
+    currentPreset: EqPreset? = null,
+    onPreset: ((EqPreset) -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    var activePreset by remember { mutableStateOf<EqPreset?>(currentPreset) }
     var tick by remember { mutableIntStateOf(0) }
+    var ready by remember { mutableStateOf(EqualizerController.isReady) }
+
+    // Ждём подключения эффекта (сессия появляется с началом воспроизведения)
+    LaunchedEffect(Unit) {
+        while (!ready) {
+            delay(400)
+            ready = EqualizerController.isReady
+        }
+    }
+
+    // Применить сохранённый пресет, когда панель открыта и EQ готов
+    LaunchedEffect(ready, currentPreset) {
+        if (ready && currentPreset != null) {
+            EqualizerController.applyPreset(currentPreset)
+            tick++
+        }
+    }
 
     Column(
-        Modifier
+        modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .background(Color.White.copy(alpha = 0.08f))
@@ -73,9 +101,10 @@ fun EqPanel(accent: Color) {
                     Text(
                         text = preset.label,
                         color = if (active) Color.White else Color.White.copy(alpha = 0.55f),
-                        fontSize = 10.sp,
+                        fontSize = 11.sp,
                         fontStyle = FontStyle.Normal,
                         fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                        maxLines = 1,
                         modifier = Modifier
                             .padding(start = 6.dp)
                             .clip(RoundedCornerShape(12.dp))
@@ -83,22 +112,41 @@ fun EqPanel(accent: Color) {
                             .clickable {
                                 activePreset = preset
                                 EqualizerController.applyPreset(preset)
+                                onPreset?.invoke(preset)
                                 tick++
                             }
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                            .padding(horizontal = 12.dp, vertical = 5.dp)
                     )
                 }
             }
         }
 
+        if (!ready) {
+            Text(
+                "Подключится, когда начнётся воспроизведение",
+                color = Color.White.copy(alpha = 0.45f),
+                fontSize = 11.sp,
+                fontStyle = FontStyle.Normal,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+        }
+
         Spacer(Modifier.height(10.dp))
 
         val bands = EqualizerController.bandCount.toInt().coerceAtMost(8)
+        if (ready && bands == 0) {
+            Text(
+                "Устройство не предоставило полос эквалайзера",
+                color = Color.White.copy(alpha = 0.45f),
+                fontSize = 11.sp,
+                fontStyle = FontStyle.Normal
+            )
+        }
         repeat(bands) { i ->
             val band = i.toShort()
             var db by remember(tick) { mutableStateOf(EqualizerController.getLevel(band) / 100f) }
             Row(
-                Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                Modifier.fillMaxWidth().padding(vertical = 3.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
@@ -106,12 +154,14 @@ fun EqPanel(accent: Color) {
                     color = Color.White.copy(alpha = 0.5f),
                     fontSize = 10.sp,
                     fontStyle = FontStyle.Normal,
-                    modifier = Modifier.width(44.dp)
+                    maxLines = 1,
+                    modifier = Modifier.width(52.dp)
                 )
                 EqSlider(
                     value = db,
                     onValueChange = {
                         db = it
+                        activePreset = null // ручной режим — пресет сброшен
                         EqualizerController.setLevel(band, (it * 100f).roundToInt().toShort())
                     },
                     modifier = Modifier.weight(1f)
@@ -121,7 +171,8 @@ fun EqPanel(accent: Color) {
                     color = Color.White.copy(alpha = 0.5f),
                     fontSize = 10.sp,
                     fontStyle = FontStyle.Normal,
-                    modifier = Modifier.width(40.dp),
+                    maxLines = 1,
+                    modifier = Modifier.width(44.dp),
                     textAlign = TextAlign.End
                 )
             }
@@ -135,10 +186,9 @@ fun EqSlider(
     onValueChange: (Float) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    BoxWithConstraints(modifier.height(22.dp), contentAlignment = Alignment.CenterStart) {
+    BoxWithConstraints(modifier.height(26.dp), contentAlignment = Alignment.CenterStart) {
         val wState = rememberUpdatedState(constraints.maxWidth.toFloat())
         val frac = ((value + 12f) / 24f).coerceIn(0f, 1f)
-
         Canvas(
             Modifier
                 .fillMaxSize()
@@ -162,7 +212,7 @@ fun EqSlider(
             val x = size.width * frac
             drawLine(Color.White.copy(alpha = 0.15f), Offset(0f, y), Offset(size.width, y), strokeWidth = 3f, cap = StrokeCap.Round)
             drawLine(Color.White, Offset(0f, y), Offset(x, y), strokeWidth = 3f, cap = StrokeCap.Round)
-            drawCircle(Color.White, radius = 5f, center = Offset(x, y))
+            drawCircle(Color.White, radius = 6f, center = Offset(x, y))
         }
     }
 }

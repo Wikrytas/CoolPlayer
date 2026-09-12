@@ -1,4 +1,4 @@
-﻿package com.wikrytas.coolplayer
+package com.wikrytas.coolplayer
 
 import android.Manifest
 import android.content.Intent
@@ -307,20 +307,20 @@ class MainActivity : ComponentActivity() {
         Canvas(modifier = Modifier.size(96.dp)) {
             val scale = size.width / 200f
             val p1 = Path().apply {
-                moveTo(10f * scale, 100f * scale); quadraticBezierTo(22f * scale, 100f * scale, 28f * scale, 78f * scale)
-                quadraticBezierTo(34f * scale, 56f * scale, 40f * scale, 100f * scale)
-                quadraticBezierTo(46f * scale, 144f * scale, 52f * scale, 40f * scale)
-                quadraticBezierTo(58f * scale, -64f * scale, 64f * scale, 100f * scale)
-                quadraticBezierTo(70f * scale, 264f * scale, 76f * scale, 128f * scale)
-                quadraticBezierTo(82f * scale, -8f * scale, 88f * scale, 100f * scale)
+                moveTo(10f * scale, 100f * scale); quadraticTo(22f * scale, 100f * scale, 28f * scale, 78f * scale)
+                quadraticTo(34f * scale, 56f * scale, 40f * scale, 100f * scale)
+                quadraticTo(46f * scale, 144f * scale, 52f * scale, 40f * scale)
+                quadraticTo(58f * scale, -64f * scale, 64f * scale, 100f * scale)
+                quadraticTo(70f * scale, 264f * scale, 76f * scale, 128f * scale)
+                quadraticTo(82f * scale, -8f * scale, 88f * scale, 100f * scale)
             }
             val p2 = Path().apply {
-                moveTo(112f * scale, 100f * scale); quadraticBezierTo(124f * scale, 100f * scale, 130f * scale, 66f * scale)
-                quadraticBezierTo(136f * scale, 32f * scale, 142f * scale, 100f * scale)
-                quadraticBezierTo(148f * scale, 168f * scale, 154f * scale, 122f * scale)
-                quadraticBezierTo(160f * scale, 76f * scale, 166f * scale, 100f * scale)
-                quadraticBezierTo(172f * scale, 124f * scale, 178f * scale, 88f * scale)
-                quadraticBezierTo(184f * scale, 52f * scale, 190f * scale, 100f * scale)
+                moveTo(112f * scale, 100f * scale); quadraticTo(124f * scale, 100f * scale, 130f * scale, 66f * scale)
+                quadraticTo(136f * scale, 32f * scale, 142f * scale, 100f * scale)
+                quadraticTo(148f * scale, 168f * scale, 154f * scale, 122f * scale)
+                quadraticTo(160f * scale, 76f * scale, 166f * scale, 100f * scale)
+                quadraticTo(172f * scale, 124f * scale, 178f * scale, 88f * scale)
+                quadraticTo(184f * scale, 52f * scale, 190f * scale, 100f * scale)
             }
             val play = Path().apply {
                 moveTo(84f * scale, 62f * scale); lineTo(138f * scale, 100f * scale)

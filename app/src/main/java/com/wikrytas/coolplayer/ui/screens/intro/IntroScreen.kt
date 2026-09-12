@@ -1,4 +1,4 @@
-﻿package com.wikrytas.coolplayer.ui.screens.intro
+package com.wikrytas.coolplayer.ui.screens.intro
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseInOut
@@ -176,23 +176,23 @@ private fun LogoMark(
     val wave1 = remember {
         Path().apply {
             moveTo(10f, 100f)
-            quadraticBezierTo(22f, 100f, 28f, 78f)
-            quadraticBezierTo(34f, 56f, 40f, 100f)
-            quadraticBezierTo(46f, 144f, 52f, 40f)
-            quadraticBezierTo(58f, -64f, 64f, 100f)
-            quadraticBezierTo(70f, 264f, 76f, 128f)
-            quadraticBezierTo(82f, -8f, 88f, 100f)
+            quadraticTo(22f, 100f, 28f, 78f)
+            quadraticTo(34f, 56f, 40f, 100f)
+            quadraticTo(46f, 144f, 52f, 40f)
+            quadraticTo(58f, -64f, 64f, 100f)
+            quadraticTo(70f, 264f, 76f, 128f)
+            quadraticTo(82f, -8f, 88f, 100f)
         }
     }
     val wave2 = remember {
         Path().apply {
             moveTo(112f, 100f)
-            quadraticBezierTo(124f, 100f, 130f, 66f)
-            quadraticBezierTo(136f, 32f, 142f, 100f)
-            quadraticBezierTo(148f, 168f, 154f, 122f)
-            quadraticBezierTo(160f, 76f, 166f, 100f)
-            quadraticBezierTo(172f, 124f, 178f, 88f)
-            quadraticBezierTo(184f, 52f, 190f, 100f)
+            quadraticTo(124f, 100f, 130f, 66f)
+            quadraticTo(136f, 32f, 142f, 100f)
+            quadraticTo(148f, 168f, 154f, 122f)
+            quadraticTo(160f, 76f, 166f, 100f)
+            quadraticTo(172f, 124f, 178f, 88f)
+            quadraticTo(184f, 52f, 190f, 100f)
         }
     }
     val playPath = remember {

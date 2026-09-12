@@ -58,9 +58,6 @@ import com.wikrytas.coolplayer.ui.screens.parsePlainLyrics
 import com.wikrytas.coolplayer.ui.theme.PlayerTheme
 import kotlinx.coroutines.launch
 
-/** Опережение прокрутки plain-текста, мс: компенсирует 500-мс тик позиции + инерцию скролла. */
-private const val PLAIN_LYRICS_LEAD_MS = 600L
-
 private fun formatDurationShort(ms: Long?): String {
     if (ms == null || ms <= 0) return ""
     val m = ms / 60000
@@ -77,6 +74,7 @@ fun LyricsCover(
     refreshKey: Int = 0,
     onlineEnabled: Boolean = true,
     offsetMs: Long = 0L,
+    onContentApplied: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()
@@ -85,7 +83,6 @@ fun LyricsCover(
     var isLoading by remember(track?.id, refreshKey) { mutableStateOf(true) }
     var notFound by remember(track?.id, refreshKey) { mutableStateOf(false) }
 
-    // Ручной поиск
     var manualArtist by remember(track?.id) {
         mutableStateOf(track?.artist?.takeIf { !it.contains("unknown", true) } ?: "")
     }
@@ -105,6 +102,7 @@ fun LyricsCover(
         }
         notFound = false
         isLoading = false
+        onContentApplied?.invoke(content)
     }
 
     LaunchedEffect(track?.id, refreshKey) {
@@ -126,11 +124,12 @@ fun LyricsCover(
         }
     }
 
-    // Бинарный поиск активной строки с учётом офсета
+    // FIX: режим выбираем по наличию таймкодов, а не по текущему индексу.
+    val isSynced = remember(lyricLines) { lyricLines?.any { it.timeMs > 0L } == true }
+
     val currentLineIndex = remember(lyricLines, currentPosition, offsetMs) {
         lyricLines?.let { lines ->
             if (lines.isEmpty()) return@let -1
-            // Обычный текст без таймкодов — активной строки нет, иначе попадём в конец
             if (lines.all { it.timeMs == 0L }) return@let -1
             val shifted = currentPosition + offsetMs
             var left = 0
@@ -148,6 +147,9 @@ fun LyricsCover(
             result
         } ?: -1
     }
+
+    // FIX: до первого таймкода не проваливаемся в plain, а держим первую строку активной
+    val activeIndex = if (isSynced) currentLineIndex.coerceAtLeast(0) else -1
 
     Box(
         modifier = modifier
@@ -172,7 +174,6 @@ fun LyricsCover(
                 }
             }
 
-            // ── РУЧНОЙ ПОИСК ──
             notFound && track != null -> {
                 Column(
                     modifier = Modifier
@@ -188,7 +189,6 @@ fun LyricsCover(
                         fontWeight = FontWeight.SemiBold
                     )
                     Spacer(modifier = Modifier.height(8.dp))
-
                     TextField(
                         value = manualArtist,
                         onValueChange = { manualArtist = it },
@@ -223,8 +223,6 @@ fun LyricsCover(
                         modifier = Modifier.fillMaxWidth().height(48.dp)
                     )
                     Spacer(modifier = Modifier.height(8.dp))
-
-                    // Фильтр «только SYNCED»
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.fillMaxWidth()
@@ -250,7 +248,6 @@ fun LyricsCover(
                         )
                     }
                     Spacer(modifier = Modifier.height(8.dp))
-
                     if (manualSearching) {
                         CircularProgressIndicator(color = theme.accent, modifier = Modifier.size(24.dp))
                     } else {
@@ -282,7 +279,6 @@ fun LyricsCover(
                                 .padding(horizontal = 28.dp, vertical = 8.dp)
                         )
                     }
-
                     if (candidates.isEmpty() && !manualSearching) {
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
@@ -293,9 +289,7 @@ fun LyricsCover(
                             textAlign = TextAlign.Center
                         )
                     }
-
                     Spacer(modifier = Modifier.height(8.dp))
-
                     candidates.forEach { c ->
                         Row(
                             modifier = Modifier
@@ -307,7 +301,6 @@ fun LyricsCover(
                                     scope.launch {
                                         runCatching {
                                             lyricsRepository.cacheLyrics(track, c.content, c.synced)
-                                            // Шаг 5: вернуть в LRCLIB то, чего у них не было
                                             if (c.source != "lrclib") {
                                                 lyricsRepository.publishToLrclib(track, c.content)
                                             }
@@ -353,11 +346,11 @@ fun LyricsCover(
 
             else -> {
                 val lines = lyricLines!!
-                if (currentLineIndex >= 0) {
-                    // ── СИНХРОНИЗИРОВАННЫЙ ТЕКСТ: окно «предыдущая / активная / следующая» ──
-                    val centerIdx = currentLineIndex
+                if (isSynced) {
+                    // FIX: караоке сразу, даже если позиция ещё до первого таймкода
+                    val centerIdx = activeIndex
                     val prevLine = if (centerIdx > 0) lines[centerIdx - 1] else null
-                    val activeLine = if (centerIdx < lines.size) lines[centerIdx] else null
+                    val activeLine = lines[centerIdx]
                     val nextLine = if (centerIdx + 1 < lines.size) lines[centerIdx + 1] else null
 
                     Column(
@@ -390,11 +383,9 @@ fun LyricsCover(
                                 )
                             }
                         }
-
                         Spacer(modifier = Modifier.height(8.dp))
-
                         AnimatedContent(
-                            targetState = activeLine?.text ?: "",
+                            targetState = activeLine.text,
                             transitionSpec = {
                                 slideInVertically(initialOffsetY = { it / 3 }, animationSpec = tween(300)) +
                                     fadeIn(animationSpec = tween(300)) togetherWith
@@ -412,21 +403,19 @@ fun LyricsCover(
                                 if (text.isNotEmpty()) {
                                     Text(
                                         text = text,
-                                        color = Color.White,
-                                        fontSize = 15.sp,
+                                        color = theme.accent,
+                                        fontSize = 16.sp,
                                         fontWeight = FontWeight.Bold,
                                         textAlign = TextAlign.Center,
                                         maxLines = 3,
                                         overflow = TextOverflow.Ellipsis,
-                                        lineHeight = 20.sp,
+                                        lineHeight = 21.sp,
                                         modifier = Modifier.fillMaxWidth()
                                     )
                                 }
                             }
                         }
-
                         Spacer(modifier = Modifier.height(8.dp))
-
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -452,46 +441,28 @@ fun LyricsCover(
                         }
                     }
                 } else {
-                    // ── ОБЫЧНЫЙ ТЕКСТ: весь текст + караоке-эмуляция по прогрессу ──
-                    val scroll = rememberScrollState()
-                    val duration = track?.duration ?: 0L
-                    val lead = currentPosition + PLAIN_LYRICS_LEAD_MS
-                    val progress = if (duration > 0)
-                        (lead.toFloat() / duration).coerceIn(0f, 1f) else 0f
-                    val estIndex = (progress * lines.size).toInt()
-                        .coerceIn(0, (lines.size - 1).coerceAtLeast(0))
-
-                    LaunchedEffect(progress) {
-                        if (scroll.maxValue > 0) {
-                            scroll.scrollTo((progress * scroll.maxValue).toInt())
-                        }
-                    }
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
-                            .verticalScroll(scroll)
+                            .verticalScroll(rememberScrollState())
                             .padding(horizontal = 16.dp, vertical = 28.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        lines.forEachIndexed { idx, line ->
-                            val active = idx == estIndex
+                        lines.forEach { line ->
                             Text(
                                 text = line.text,
-                                color = if (active) theme.accent
-                                        else Color.White.copy(alpha = 0.45f),
-                                fontSize = if (active) 15.sp else 13.sp,
-                                fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                                color = Color.White.copy(alpha = 0.75f),
+                                fontSize = 14.sp,
                                 lineHeight = 22.sp,
                                 textAlign = TextAlign.Center,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(vertical = 2.dp)
+                                    .padding(vertical = 3.dp)
                             )
                         }
                     }
                 }
 
-                // Градиентные «затухания» сверху/снизу — общие для обоих режимов
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopCenter)

@@ -16,6 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -64,6 +65,9 @@ fun AppUpdateCard(theme: PlayerTheme, modifier: Modifier = Modifier) {
         }
     }
 
+    // FIX: авто-проверка при открытии карточки
+    LaunchedEffect(Unit) { check() }
+
     fun startUpdate(info: UpdateInfo) {
         state = UpdateUiState.Downloading(0)
         scope.launch {
@@ -96,7 +100,6 @@ fun AppUpdateCard(theme: PlayerTheme, modifier: Modifier = Modifier) {
             fontWeight = FontWeight.SemiBold
         )
         Spacer(Modifier.height(10.dp))
-
         when (val s = state) {
             UpdateUiState.Idle -> {
                 UpdateButton("Проверить обновления", theme) { check() }

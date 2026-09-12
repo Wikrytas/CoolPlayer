@@ -1,4 +1,4 @@
-﻿package com.wikrytas.coolplayer.ui.screens
+package com.wikrytas.coolplayer.ui.screens
 
 import android.content.Intent
 import android.widget.Toast
@@ -14,7 +14,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
@@ -74,7 +74,7 @@ fun LogScreen(onBack: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onBack) {
-                Icon(Icons.Default.ArrowBack, "Назад", tint = Color.White)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад", tint = Color.White)
             }
             Text(
                 "Лог приложения",

@@ -1,11 +1,11 @@
-# Gradle
+﻿# Gradle
 .gradle/
 build/
 app/build/
 app/.gradle/
 build/reports/
 
-# Локальные пути SDK
+# Р›РѕРєР°Р»СЊРЅС‹Рµ РїСѓС‚Рё SDK
 local.properties
 
 # IDE
@@ -13,17 +13,16 @@ local.properties
 *.iml
 .DS_Store
 
-# Keystore (никогда в репозиторий)
+# Keystore (РЅРёРєРѕРіРґР° РІ СЂРµРїРѕР·РёС‚РѕСЂРёР№)
 *.jks
 *.keystore
 
-# Логи
+# Р›РѕРіРё
 *.log
-# ������
+# Бэкапы
 *.zip
 
-# ��������� ������� �������
-gradle.properties
+# Локальные секреты подписи
 
 # Heap dumps (OOM)
 *.hprof

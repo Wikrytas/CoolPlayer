@@ -22,22 +22,21 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.text.Normalizer
+import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 
-/** Сетевая ошибка (таймаут/5xx) — отличаем от «в базе нет». */
 private class LyricsNetworkException(msg: String) : Exception(msg)
 
-/** Кандидат текста из онлайн-источника (для ручного выбора и скоринга). */
 data class LyricsCandidate(
-    val source: String,        // "lrclib" / "netease" / "lyrics.ovh"
-    val remoteId: Long?,       // id в источнике
+    val source: String,
+    val remoteId: Long?,
     val artist: String,
     val title: String,
     val content: String,
     val synced: Boolean,
     val durationMs: Long?,
-    val score: Float           // 0..1
+    val score: Float
 )
 
 class LyricsRepository(private val context: Context) {
@@ -49,6 +48,7 @@ class LyricsRepository(private val context: Context) {
         private const val MIN_SCORE = 0.55f
         private const val DURATION_TOLERANCE_MS = 4000L
         private const val MISSING_TTL_MS = 7L * 24 * 60 * 60 * 1000
+        private const val NOSYNC_TTL_MS = 24L * 60 * 60 * 1000
         private val LRC_REGEX = Regex("\\[\\d{2}:\\d{2}")
     }
 
@@ -62,8 +62,6 @@ class LyricsRepository(private val context: Context) {
         get() = File(context.filesDir, CACHE_DIR).apply { mkdirs() }
 
     private val inFlight = ConcurrentHashMap<Long, CompletableDeferred<String?>>()
-
-    // ────────────────────────── Публичный API ──────────────────────────
 
     fun getCachedLyrics(track: Track): String? {
         val lrc = File(cacheDir, "${track.id}.lrc")
@@ -85,13 +83,15 @@ class LyricsRepository(private val context: Context) {
                 target.writeText(content)
                 tmp.delete()
             }
+            if (isSynced) File(cacheDir, "${track.id}.txt").delete()
+            File(cacheDir, "${track.id}.missing").delete()
+            if (isSynced) File(cacheDir, "${track.id}.nosync").delete()
             AppLogger.d(TAG, "cached id=${track.id}, synced=$isSynced, len=${content.length}")
         } catch (e: Exception) {
             AppLogger.w(TAG, "cacheLyrics failed id=${track.id}", e)
         }
     }
 
-    /** TTL: метка «не найдено» протухает раз в неделю. */
     private fun isMissing(trackId: Long): Boolean {
         val f = File(cacheDir, "$trackId.missing")
         if (!f.exists()) return false
@@ -102,9 +102,20 @@ class LyricsRepository(private val context: Context) {
         runCatching { File(cacheDir, "$trackId.missing").writeBytes(ByteArray(0)) }
     }
 
+    private fun isNoSync(trackId: Long): Boolean {
+        val f = File(cacheDir, "$trackId.nosync")
+        if (!f.exists()) return false
+        return System.currentTimeMillis() - f.lastModified() < NOSYNC_TTL_MS
+    }
+
+    private fun markNoSync(trackId: Long) {
+        AppLogger.d(TAG, "nosync marked id=$trackId")
+        runCatching { File(cacheDir, "$trackId.nosync").writeBytes(ByteArray(0)) }
+    }
+
     fun clearCache(track: Track) {
         AppLogger.d(TAG, "clearCache id=${track.id}")
-        listOf("lrc", "txt", "missing").forEach {
+        listOf("lrc", "txt", "missing", "nosync").forEach {
             runCatching { File(cacheDir, "${track.id}.$it").delete() }
         }
     }
@@ -119,13 +130,11 @@ class LyricsRepository(private val context: Context) {
         val deferred = CompletableDeferred<String?>()
         val prev = inFlight.putIfAbsent(track.id, deferred)
         if (prev != null) return prev.await()
-
         return try {
             val r = resolveInternal(track, forceOnline, useOnline)
             deferred.complete(r)
             r
         } catch (e: CancellationException) {
-            // Первый запрос отменён (пользователь ушёл с экрана) — не роняем ожидающих
             deferred.complete(null)
             throw e
         } catch (e: Exception) {
@@ -137,89 +146,138 @@ class LyricsRepository(private val context: Context) {
         }
     }
 
-    // ────────────────────────── Внутренний резолв ──────────────────────────
-
     private suspend fun resolveInternal(track: Track, forceOnline: Boolean, useOnline: Boolean): String? =
         withContext(Dispatchers.IO) {
+            var plainFallback: String? = null
             if (!forceOnline) {
                 if (isMissing(track.id)) {
                     AppLogger.d(TAG, "resolve id=${track.id}: missing-marker hit")
                     return@withContext null
                 }
-                getCachedLyrics(track)?.let {
-                    AppLogger.d(TAG, "resolve id=${track.id}: cache hit, len=${it.length}")
-                    return@withContext it
+                val lrc = File(cacheDir, "${track.id}.lrc")
+                if (lrc.exists() && lrc.length() > 0) {
+                    AppLogger.d(TAG, "resolve id=${track.id}: cache synced hit")
+                    return@withContext lrc.readText()
                 }
+                val txt = File(cacheDir, "${track.id}.txt")
+                if (txt.exists() && txt.length() > 0) plainFallback = txt.readText()
                 readEmbeddedLyrics(track)?.let { content ->
-                    AppLogger.d(TAG, "resolve id=${track.id}: embedded hit, len=${content.length}")
-                    cacheLyrics(track, content, content.contains(LRC_REGEX))
-                    return@withContext content
+                    if (content.contains(LRC_REGEX)) {
+                        AppLogger.d(TAG, "resolve id=${track.id}: embedded synced hit")
+                        cacheLyrics(track, content, true)
+                        return@withContext content
+                    }
+                    if (plainFallback == null) plainFallback = content
                 }
                 readLocalLrc(track)?.let { content ->
-                    AppLogger.d(TAG, "resolve id=${track.id}: local .lrc hit, len=${content.length}")
-                    cacheLyrics(track, content, content.contains(LRC_REGEX))
-                    return@withContext content
+                    if (content.contains(LRC_REGEX)) {
+                        AppLogger.d(TAG, "resolve id=${track.id}: local .lrc hit")
+                        cacheLyrics(track, content, true)
+                        return@withContext content
+                    }
+                    if (plainFallback == null) plainFallback = content
                 }
             }
-
             if (forceOnline || useOnline) {
-                AppLogger.d(TAG, "resolve id=${track.id}: online search start (force=$forceOnline)")
-                when (val res = fetchOnline(track)) {
+                val skipSynced = !forceOnline && isNoSync(track.id)
+                if (!skipSynced) {
+                    when (val res = fetchOnline(track, syncedOnly = true)) {
+                        is OnlineResult.Found -> {
+                            AppLogger.i(TAG, "resolve id=${track.id}: synced OK src=${res.candidate?.source}")
+                            cacheLyrics(track, res.content, true)
+                            File(cacheDir, "${track.id}.missing").delete()
+                            return@withContext res.content
+                        }
+                        OnlineResult.Error -> {
+                            AppLogger.w(TAG, "resolve id=${track.id}: network error, will retry later")
+                            return@withContext plainFallback
+                        }
+                        OnlineResult.NotFound -> {}
+                    }
+                } else {
+                    AppLogger.d(TAG, "resolve id=${track.id}: nosync marker, skip synced phase")
+                }
+                when (val res = fetchOnline(track, syncedOnly = false)) {
                     is OnlineResult.Found -> {
-                        AppLogger.i(TAG, "resolve id=${track.id}: online OK src=${res.candidate?.source}, len=${res.content.length}, synced=${res.content.contains(LRC_REGEX)}")
-                        cacheLyrics(track, res.content, res.content.contains(LRC_REGEX))
+                        AppLogger.i(TAG, "resolve id=${track.id}: plain fallback src=${res.candidate?.source}")
+                        cacheLyrics(track, res.content, false)
+                        markNoSync(track.id)
                         File(cacheDir, "${track.id}.missing").delete()
                         return@withContext res.content
                     }
-                    OnlineResult.NotFound -> {
-                        if (!forceOnline) {
-                            AppLogger.d(TAG, "resolve id=${track.id}: definitively not found, mark missing")
-                            markMissing(track.id)
-                        }
-                        return@withContext null
-                    }
-                    OnlineResult.Error -> {
-                        AppLogger.w(TAG, "resolve id=${track.id}: network error, will retry later")
-                        return@withContext null
-                    }
+                    else -> {}
+                }
+                if (!forceOnline && plainFallback == null) {
+                    AppLogger.d(TAG, "resolve id=${track.id}: nothing found, mark missing")
+                    markMissing(track.id)
                 }
             }
-            null
+            plainFallback
         }
 
-    private suspend fun fetchOnline(track: Track): OnlineResult = withContext(Dispatchers.IO) {
-        // 1) LRCLIB (основной)
-        val candidates = searchCandidates(track) ?: return@withContext OnlineResult.Error
-        val best = candidates.firstOrNull()
-        if (best != null && best.score >= MIN_SCORE) {
-            return@withContext OnlineResult.Found(best.content, best)
+    private suspend fun fetchOnline(track: Track, syncedOnly: Boolean): OnlineResult = withContext(Dispatchers.IO) {
+        var netAlive = false
+        val candidates = searchCandidates(track)
+        if (candidates != null) {
+            netAlive = true
+            val pool = if (syncedOnly) candidates.filter { it.synced } else candidates
+            val best = pool.firstOrNull()
+            if (best != null && best.score >= MIN_SCORE) {
+                return@withContext OnlineResult.Found(best.content, best)
+            }
+        } else {
+            AppLogger.w(TAG, "phase: lrclib down, trying mirrors")
         }
-        // 2) NetEase (fallback: у LRCLIB нет — у китайцев может быть)
+        val kg = fetchKugouCandidates(track.artist, track.title, track.duration)
+        if (kg != null) {
+            netAlive = true
+            kg.map { it.copy(score = scoreCandidate(it, track)) }
+                .filter { it.score >= MIN_SCORE }
+                .sortedByDescending { it.score }
+                .firstOrNull()
+                ?.let {
+                    AppLogger.i(TAG, "kugou match: score=${"%.2f".format(it.score)}")
+                    return@withContext OnlineResult.Found(it.content, it)
+                }
+        }
+        val qq = fetchQqCandidates(track.artist, track.title)
+        if (qq != null) {
+            netAlive = true
+            qq.map { it.copy(score = scoreCandidate(it, track)) }
+                .filter { it.score >= MIN_SCORE }
+                .sortedByDescending { it.score }
+                .firstOrNull()
+                ?.let {
+                    AppLogger.i(TAG, "qq match: score=${"%.2f".format(it.score)}")
+                    return@withContext OnlineResult.Found(it.content, it)
+                }
+        }
         val ne = fetchNeteaseCandidates(track.artist, track.title)
-            .map { it.copy(score = scoreCandidate(it, track)) }
-            .filter { it.score >= MIN_SCORE }
-            .sortedByDescending { it.score }
-        if (ne.isNotEmpty()) {
-            AppLogger.i(TAG, "netease match: score=${"%.2f".format(ne.first().score)}")
-            return@withContext OnlineResult.Found(ne.first().content, ne.first())
+        if (ne != null) {
+            netAlive = true
+            ne.map { it.copy(score = scoreCandidate(it, track)) }
+                .filter { it.score >= MIN_SCORE && (!syncedOnly || it.synced) }
+                .sortedByDescending { it.score }
+                .firstOrNull()
+                ?.let {
+                    AppLogger.i(TAG, "netease match: score=${"%.2f".format(it.score)}")
+                    return@withContext OnlineResult.Found(it.content, it)
+                }
         }
-        // 3) lyrics.ovh (последний фолбэк, обычно plain)
-        val ovh = fetchLyricsOvh(track.artist, track.title)
-        if (ovh != null) {
-            val scored = ovh.copy(score = scoreCandidate(ovh, track))
-            if (scored.score >= MIN_SCORE) return@withContext OnlineResult.Found(scored.content, scored)
+        if (!syncedOnly) {
+            val ovh = fetchLyricsOvh(track.artist, track.title)
+            if (ovh != null) {
+                val scored = ovh.copy(score = scoreCandidate(ovh, track))
+                if (scored.score >= MIN_SCORE) return@withContext OnlineResult.Found(scored.content, scored)
+            }
         }
-        OnlineResult.NotFound
+        if (netAlive) OnlineResult.NotFound else OnlineResult.Error
     }
 
-    // ────────────────────────── Уровень 1: лестница + скоринг ──────────────────────────
-
-    /** Автопоиск LRCLIB: отсортированные кандидаты. null = сетевая ошибка (отлично от «пусто»). */
     private suspend fun searchCandidates(track: Track): List<LyricsCandidate>? = withContext(Dispatchers.IO) {
         val variants = titleVariants(track.title)
         val artists = artistVariants(track.artist)
         val found = LinkedHashMap<String, LyricsCandidate>()
-
         try {
             outer@ for (artist in artists) {
                 var first = true
@@ -241,26 +299,18 @@ class LyricsRepository(private val context: Context) {
             AppLogger.w(TAG, "lrclib network error: ${e.message}")
             return@withContext null
         }
-
-        if (found.isEmpty()) {
-            AppLogger.d(TAG, "lrclib: no results for id=${track.id}")
-        }
-
+        if (found.isEmpty()) AppLogger.d(TAG, "lrclib: no results for id=${track.id}")
         found.values
             .map { it.copy(score = scoreCandidate(it, track)) }
             .sortedWith(compareByDescending<LyricsCandidate> { it.synced }.thenByDescending { it.score })
             .toList()
     }
 
-    /** Ручной поиск по произвольному запросу. Сетевые ошибки НЕ падают наружу. */
     suspend fun searchLyricsCandidates(query: String, syncedOnly: Boolean = false): List<LyricsCandidate> =
         withContext(Dispatchers.IO) {
             val cleaned = cleanPart(query)
             if (cleaned.isBlank()) return@withContext emptyList()
-
             val results = LinkedHashMap<String, LyricsCandidate>()
-
-            // LRCLIB — ошибки глотаем, идём дальше по цепочке
             try {
                 fetchLrclibCandidates("", cleaned).forEach { c ->
                     results.putIfAbsent("${c.artist}|${c.title}|${c.content.hashCode()}", c)
@@ -276,72 +326,68 @@ class LyricsRepository(private val context: Context) {
             } catch (e: LyricsNetworkException) {
                 AppLogger.w(TAG, "searchLyricsCandidates: lrclib unavailable (${e.message})")
             }
-
             var list = results.values.toList()
             if (syncedOnly) list = list.filter { it.synced }
-
             if (list.isEmpty()) {
                 val parts = cleaned.split(" - ", limit = 2)
-                val ne = if (parts.size == 2)
-                    fetchNeteaseCandidates(parts[0].trim(), parts[1].trim())
-                else fetchNeteaseCandidates("", cleaned)
-                ne.forEach { c -> results.putIfAbsent("${c.artist}|${c.title}|${c.content.hashCode()}", c) }
+                val a = if (parts.size == 2) parts[0].trim() else ""
+                val t = if (parts.size == 2) parts[1].trim() else cleaned
+                fetchKugouCandidates(a, t, 0L)?.forEach { c -> results.putIfAbsent(key(c), c) }
+                fetchQqCandidates(a, t)?.forEach { c -> results.putIfAbsent(key(c), c) }
+                fetchNeteaseCandidates(a, t)?.forEach { c -> results.putIfAbsent(key(c), c) }
                 list = results.values.toList()
                 if (syncedOnly) list = list.filter { it.synced }
             }
-
             if (list.isEmpty()) {
                 val ovh = fetchLyricsOvh("", cleaned)
-                if (ovh != null) results[ovh.title] = ovh
+                if (ovh != null) results[key(ovh)] = ovh
                 list = results.values.toList()
                 if (syncedOnly) list = list.filter { it.synced }
             }
-
             list.map { c -> c.copy(score = queryMatchScore(c, cleaned)) }
                 .sortedWith(compareByDescending<LyricsCandidate> { it.synced }.thenByDescending { it.score })
                 .toList()
         }
 
-    /** Ручной поиск по раздельным полям artist/title (из LyricsCover). Сетевые ошибки НЕ падают наружу. */
     suspend fun searchByQuery(artist: String, title: String, syncedOnly: Boolean = false): List<LyricsCandidate> =
         withContext(Dispatchers.IO) {
             val results = LinkedHashMap<String, LyricsCandidate>()
             val a = artist.trim()
             val t = title.trim()
-
             try {
                 if (a.isNotBlank() && t.isNotBlank()) {
-                    fetchLrclibCandidates(a, t).forEach { c ->
-                        results.putIfAbsent("${c.artist}|${c.title}|${c.content.hashCode()}", c)
-                    }
+                    fetchLrclibCandidates(a, t).forEach { c -> results.putIfAbsent(key(c), c) }
                 }
                 if (t.isNotBlank()) {
-                    fetchLrclibCandidates("", t).forEach { c ->
-                        results.putIfAbsent("${c.artist}|${c.title}|${c.content.hashCode()}", c)
-                    }
+                    fetchLrclibCandidates("", t).forEach { c -> results.putIfAbsent(key(c), c) }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: LyricsNetworkException) {
                 AppLogger.w(TAG, "searchByQuery: lrclib unavailable (${e.message})")
             }
-
             var list = results.values.toList()
             if (syncedOnly) list = list.filter { it.synced }
-
-            // NetEase-фолбэк (внутри сам всё глотает)
             if (list.isEmpty()) {
-                fetchNeteaseCandidates(a, t).forEach { c ->
-                    results.putIfAbsent("${c.artist}|${c.title}|${c.content.hashCode()}", c)
-                }
+                fetchKugouCandidates(a, t, 0L)?.forEach { c -> results.putIfAbsent(key(c), c) }
+                list = results.values.toList()
+                if (syncedOnly) list = list.filter { it.synced }
+            }
+            if (list.isEmpty()) {
+                fetchQqCandidates(a, t)?.forEach { c -> results.putIfAbsent(key(c), c) }
+                list = results.values.toList()
+                if (syncedOnly) list = list.filter { it.synced }
+            }
+            if (list.isEmpty()) {
+                fetchNeteaseCandidates(a, t)?.forEach { c -> results.putIfAbsent(key(c), c) }
                 list = results.values.toList()
                 if (syncedOnly) list = list.filter { it.synced }
             }
             list
         }
 
-    /** Публикация текста в LRCLIB. Для текстов НЕ из LRCLIB (netease/ovh/будущий aeneas).
-     *  Неофициальная схема /api/requests — если отвалится, просто не публикуем. */
+    private fun key(c: LyricsCandidate) = "${c.source}|${c.artist}|${c.title}|${c.content.hashCode()}"
+
     suspend fun publishToLrclib(track: Track, content: String): Boolean = withContext(Dispatchers.IO) {
         try {
             val json = JSONObject().apply {
@@ -371,16 +417,13 @@ class LyricsRepository(private val context: Context) {
         }
     }
 
-    /** Лестница LRCLIB: точный get → структурный search → свободный q=. Ошибки пробрасываются. */
     private suspend fun fetchLrclibCandidates(artist: String, title: String): List<LyricsCandidate> =
         withContext(Dispatchers.IO) {
-            // 1) Точный match
             if (artist.isNotBlank() && title.isNotBlank()) {
                 getJson("https://lrclib.net/api/get?artist_name=${enc(artist)}&track_name=${enc(title)}")
                     ?.let { obj -> candidateFromJson(obj)?.let { return@withContext listOf(it) } }
                 delay(300)
             }
-            // 2) Структурный search
             if (title.isNotBlank()) {
                 val p = buildString {
                     append("track_name=").append(enc(title))
@@ -390,7 +433,6 @@ class LyricsRepository(private val context: Context) {
                 if (structured.isNotEmpty()) return@withContext structured
                 delay(300)
             }
-            // 3) Свободный текст
             val q = listOf(artist, title).filter { it.isNotBlank() }.joinToString(" ")
             if (q.isBlank()) return@withContext emptyList()
             searchJson("https://lrclib.net/api/search?q=${enc(q)}")
@@ -423,17 +465,114 @@ class LyricsRepository(private val context: Context) {
             .sortedByDescending { it.synced }
     }
 
-    // ────────────────────────── NetEase (неофициальный фолбэк) ──────────────────────────
+    private suspend fun fetchKugouCandidates(artist: String, title: String, durationMs: Long): List<LyricsCandidate>? =
+        withContext(Dispatchers.IO) {
+            val keyword = listOf(artist, title).filter { it.isNotBlank() }.joinToString(" - ")
+            if (keyword.isBlank()) return@withContext emptyList()
+            try {
+                val searchUrl = "https://lyrics.kugou.com/search?ver=1&man=yes&client=pc" +
+                        "&keyword=${enc(keyword)}&hash=&timelength=$durationMs&duration=$durationMs"
+                val obj = getJson(searchUrl, mapOf("User-Agent" to "Mozilla/5.0"))
+                    ?: return@withContext null
+                val cands = obj.optJSONArray("candidates") ?: return@withContext emptyList()
+                val results = LinkedHashMap<String, LyricsCandidate>()
+                var checked = 0
+                for (i in 0 until cands.length()) {
+                    if (checked >= 3 || results.isNotEmpty()) break
+                    val c = cands.optJSONObject(i) ?: continue
+                    val id = c.optString("id")
+                    val accesskey = c.optString("accesskey")
+                    if (id.isBlank() || accesskey.isBlank()) continue
+                    val song = c.optString("song")
+                    val singer = c.optString("singer")
+                    val dur = c.optLong("duration").takeIf { it > 0 }
+                    val titleRef = title.ifBlank { song }
+                    if (tokenSimilarity(normalize(song), normalize(titleRef)) < 0.45f) continue
+                    checked++
+                    val dlUrl = "https://lyrics.kugou.com/download?ver=1&client=pc" +
+                            "&id=${enc(id)}&accesskey=${enc(accesskey)}&fmt=lrc&charset=utf8"
+                    val dl = runCatching { getJson(dlUrl, mapOf("User-Agent" to "Mozilla/5.0")) }.getOrNull()
+                        ?: continue
+                    val b64 = dl.optString("content", "")
+                    if (b64.isBlank()) continue
+                    val lrc = runCatching { String(Base64.getDecoder().decode(b64), Charsets.UTF_8) }.getOrNull()
+                        ?: continue
+                    if (lrc.length < MIN_LYRICS_LENGTH || !lrc.contains(LRC_REGEX)) continue
+                    AppLogger.d(TAG, "kugou candidate: '$singer - $song'")
+                    results.putIfAbsent(
+                        "${singer}|${song}|${lrc.hashCode()}",
+                        LyricsCandidate("kugou", null, singer, song, lrc, true, dur, 0f)
+                    )
+                }
+                results.values.toList()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: LyricsNetworkException) {
+                AppLogger.w(TAG, "kugou network error: ${e.message}")
+                null
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "kugou failed: ${e.message}")
+                emptyList()
+            }
+        }
 
-    /** NetEase Cloud Music: search → lyric. Неофициальное API, без гарантий;
-     *  любая ошибка = пустой результат (это фолбэк, не источник истины). */
-    private suspend fun fetchNeteaseCandidates(artist: String, title: String): List<LyricsCandidate> =
+    private suspend fun fetchQqCandidates(artist: String, title: String): List<LyricsCandidate>? =
+        withContext(Dispatchers.IO) {
+            val q = listOf(artist, title).filter { it.isNotBlank() }.joinToString(" ")
+            if (q.isBlank()) return@withContext emptyList()
+            try {
+                val searchUrl = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w=${enc(q)}&format=json&p=1&n=8"
+                val obj = getJson(searchUrl, mapOf("Referer" to "https://y.qq.com/"))
+                    ?: return@withContext null
+                val list = obj.optJSONObject("data")?.optJSONObject("song")?.optJSONArray("list")
+                    ?: return@withContext emptyList()
+                val results = LinkedHashMap<String, LyricsCandidate>()
+                var checked = 0
+                for (i in 0 until list.length()) {
+                    if (checked >= 3 || results.isNotEmpty()) break
+                    val s = list.optJSONObject(i) ?: continue
+                    val mid = s.optString("songmid")
+                    if (mid.isBlank()) continue
+                    val name = s.optString("songname")
+                    val singer = s.optJSONArray("singer")?.optJSONObject(0)?.optString("name", "")
+                        ?: s.optString("singername", "")
+                    val titleRef = title.ifBlank { name }
+                    if (tokenSimilarity(normalize(name), normalize(titleRef)) < 0.45f) continue
+                    checked++
+                    val lyricUrl = "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=${enc(mid)}&format=json"
+                    val l = runCatching { getJson(lyricUrl, mapOf("Referer" to "https://y.qq.com/portal/player.html")) }.getOrNull()
+                        ?: continue
+                    val b64 = l.optString("lyric", "")
+                    if (b64.isBlank()) continue
+                    val lrc = runCatching { String(Base64.getDecoder().decode(b64), Charsets.UTF_8) }.getOrNull()
+                        ?: continue
+                    if (lrc.length < MIN_LYRICS_LENGTH || !lrc.contains(LRC_REGEX)) continue
+                    val interval = s.optLong("interval").takeIf { it > 0 }?.times(1000)
+                    AppLogger.d(TAG, "qq candidate: '$singer - $name'")
+                    results.putIfAbsent(
+                        "${singer}|${name}|${lrc.hashCode()}",
+                        LyricsCandidate("qq", null, singer, name, lrc, true, interval, 0f)
+                    )
+                }
+                results.values.toList()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: LyricsNetworkException) {
+                AppLogger.w(TAG, "qq network error: ${e.message}")
+                null
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "qq failed: ${e.message}")
+                emptyList()
+            }
+        }
+
+    private suspend fun fetchNeteaseCandidates(artist: String, title: String): List<LyricsCandidate>? =
         withContext(Dispatchers.IO) {
             val q = listOf(artist, title).filter { it.isNotBlank() }.joinToString(" ")
             if (q.isBlank()) return@withContext emptyList()
             try {
                 val obj = getJson("https://music.163.com/api/search/get?s=${enc(q)}&limit=8&type=1")
-                    ?: return@withContext emptyList()
+                    ?: return@withContext null
                 val songs = obj.optJSONObject("result")?.optJSONArray("songs") ?: return@withContext emptyList()
                 val results = LinkedHashMap<String, LyricsCandidate>()
                 var checked = 0
@@ -443,7 +582,6 @@ class LyricsRepository(private val context: Context) {
                     val id = s.optLong("id"); if (id <= 0) continue
                     val name = s.optString("name", "")
                     val art = s.optJSONArray("artists")?.optJSONObject(0)?.optString("name", "") ?: ""
-                    // берём только близкие по названию, иначе уйдём в мусор
                     val titleRef = title.ifBlank { name }
                     if (tokenSimilarity(normalize(name), normalize(titleRef)) < 0.45f) continue
                     checked++
@@ -453,32 +591,27 @@ class LyricsRepository(private val context: Context) {
                     val lyric = lrcObj.optJSONObject("lrc")?.optString("lyric", "") ?: ""
                     if (lyric.length < MIN_LYRICS_LENGTH) continue
                     val c = LyricsCandidate(
-                        source = "netease",
-                        remoteId = id,
-                        artist = art,
-                        title = name,
-                        content = lyric,
-                        synced = lyric.contains(LRC_REGEX),
-                        durationMs = s.optLong("duration").takeIf { it > 0 },
-                        score = 0f
+                        "netease", id, art, name, lyric,
+                        lyric.contains(LRC_REGEX), s.optLong("duration").takeIf { it > 0 }, 0f
                     )
-                    results.putIfAbsent("${c.artist}|${c.title}|${c.content.hashCode()}", c)
+                    results.putIfAbsent(key(c), c)
                     if (c.synced) break
                     delay(250)
                 }
                 results.values.toList()
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: LyricsNetworkException) {
+                AppLogger.w(TAG, "netease network error: ${e.message}")
+                null
             } catch (e: Exception) {
                 AppLogger.w(TAG, "netease failed: ${e.message}")
                 emptyList()
             }
         }
 
-    // ────────────────────────── HTTP ──────────────────────────
-
-    private suspend fun getJson(url: String): JSONObject? {
-        val body = httpGet(url) ?: return null
+    private suspend fun getJson(url: String, headers: Map<String, String> = emptyMap()): JSONObject? {
+        val body = httpGet(url, headers = headers) ?: return null
         return runCatching { JSONObject(body) }.getOrNull()
     }
 
@@ -487,43 +620,43 @@ class LyricsRepository(private val context: Context) {
         return runCatching { JSONArray(body) }.getOrNull()
     }
 
-    /** GET с одним повтором при 429/5xx. null = 404 (нет данных), исключение = сбой сети. */
-    private suspend fun httpGet(url: String, attempt: Int = 0): String? = withContext(Dispatchers.IO) {
-        var conn: HttpURLConnection? = null
-        try {
-            conn = URL(url).openConnection() as HttpURLConnection
-            conn.connectTimeout = 10_000
-            conn.readTimeout = 10_000
-            conn.setRequestProperty("User-Agent", "CoolPlayer/1.1 (android)")
-            val code = conn.responseCode
-            if (code == 429 || code >= 500) {
-                AppLogger.w(TAG, "http $code for $url")
-                if (attempt == 0) {
-                    conn.disconnect()
-                    delay(1500)
-                    return@withContext httpGet(url, 1)
+    private suspend fun httpGet(url: String, attempt: Int = 0, headers: Map<String, String> = emptyMap()): String? =
+        withContext(Dispatchers.IO) {
+            var conn: HttpURLConnection? = null
+            try {
+                conn = URL(url).openConnection() as HttpURLConnection
+                conn.connectTimeout = 10_000
+                conn.readTimeout = 10_000
+                conn.setRequestProperty("User-Agent", "CoolPlayer/1.1 (android)")
+                headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
+                val code = conn.responseCode
+                if (code == 429 || code >= 500) {
+                    AppLogger.w(TAG, "http $code for $url")
+                    if (attempt == 0) {
+                        conn.disconnect()
+                        delay(1500)
+                        return@withContext httpGet(url, 1, headers)
+                    }
+                    throw LyricsNetworkException("http $code")
                 }
-                throw LyricsNetworkException("http $code")
+                if (code == 404) return@withContext null
+                if (code != 200) {
+                    AppLogger.w(TAG, "http $code for $url")
+                    throw LyricsNetworkException("http $code")
+                }
+                conn.inputStream.bufferedReader().use { it.readText() }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: LyricsNetworkException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "http failed: ${e.message}")
+                throw LyricsNetworkException(e.message ?: "network error")
+            } finally {
+                conn?.disconnect()
             }
-            if (code == 404) return@withContext null
-            if (code != 200) {
-                AppLogger.w(TAG, "http $code for $url")
-                throw LyricsNetworkException("http $code")
-            }
-            conn.inputStream.bufferedReader().use { it.readText() }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: LyricsNetworkException) {
-            throw e
-        } catch (e: Exception) {
-            AppLogger.w(TAG, "http failed: ${e.message}")
-            throw LyricsNetworkException(e.message ?: "network error")
-        } finally {
-            conn?.disconnect()
         }
-    }
 
-    /** lyrics.ovh: exact-match, plain-тексты. */
     private suspend fun fetchLyricsOvh(artist: String, title: String): LyricsCandidate? =
         withContext(Dispatchers.IO) {
             val a = artist.ifBlank { "Unknown" }
@@ -542,38 +675,24 @@ class LyricsRepository(private val context: Context) {
                 conn.disconnect()
                 val lyrics = JSONObject(body).optString("lyrics", "")
                 if (lyrics.length < MIN_LYRICS_LENGTH) return@withContext null
-                LyricsCandidate(
-                    source = "lyrics.ovh",
-                    remoteId = null,
-                    artist = artist,
-                    title = title,
-                    content = lyrics,
-                    synced = false,
-                    durationMs = null,
-                    score = 0f
-                )
+                LyricsCandidate("lyrics.ovh", null, artist, title, lyrics, false, null, 0f)
             } catch (e: Exception) {
                 AppLogger.w(TAG, "lyrics.ovh failed: ${e.message}")
                 null
             }
         }
 
-    // ────────────────────────── Нормализация и скоринг ──────────────────────────
-
     private fun titleVariants(raw: String): List<String> {
         val base = cleanPart(raw)
         val noDash = base.substringBefore(" - ").trim()
         val noFeat = base.replace(Regex("(?i)\\s*feat\\.?\\s.*$"), "").trim()
-        return listOf(base, noDash, noFeat)
-            .map { it.trim() }
-            .distinct()
-            .filter { it.isNotBlank() }
+        return listOf(base, noDash, noFeat).map { it.trim() }.distinct().filter { it.isNotBlank() }
     }
 
     private fun artistVariants(raw: String): List<String> =
         listOf(raw.split(",")[0])
             .map { cleanPart(it) }
-            .filter { it.isNotBlank() && !it.contains("unknown", true) }
+            .filter { it.isNotBlank() && !it.contains("unknown", true) && !it.contains("неизвестн", true) }
             .ifEmpty { listOf("") }
 
     private fun normalize(s: String): String =
@@ -583,7 +702,6 @@ class LyricsRepository(private val context: Context) {
             .replace(Regex("\\s+"), " ")
             .trim()
 
-    /** Скоринг кандидата относительно трека. */
     private fun scoreCandidate(c: LyricsCandidate, track: Track): Float {
         val titleSim = tokenSimilarity(normalize(c.title), normalize(track.title))
         val artistSim = tokenSimilarity(normalize(c.artist), normalize(track.artist))
@@ -598,7 +716,6 @@ class LyricsRepository(private val context: Context) {
         return s
     }
 
-    /** Скоринг для ручного поиска: совпадение токенов с запросом. */
     private fun queryMatchScore(c: LyricsCandidate, query: String): Float {
         val q = normalize(query)
         val combined = normalize("${c.artist} ${c.title}")
@@ -627,8 +744,6 @@ class LyricsRepository(private val context: Context) {
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 
-    // ────────────────────────── Локальные источники ──────────────────────────
-
     fun readEmbeddedLyrics(track: Track): String? {
         return try {
             val extension = getFileExtension(track)
@@ -638,8 +753,7 @@ class LyricsRepository(private val context: Context) {
             } ?: return null
             try {
                 val audio = AudioFileIO.read(tempFile)
-                val tag = audio.tag
-                tag?.getFirst(FieldKey.LYRICS)?.takeIf { it.isNotBlank() }
+                audio.tag?.getFirst(FieldKey.LYRICS)?.takeIf { it.isNotBlank() }
             } finally {
                 tempFile.delete()
             }
@@ -665,24 +779,18 @@ class LyricsRepository(private val context: Context) {
                 } else null
             } ?: return null
             val (relativePath, displayName) = pair
-
             val baseName = displayName.substringBeforeLast(".")
-            val lrcFileName = "$baseName.lrc"
             val filesProjection = arrayOf(MediaStore.Files.FileColumns.DATA)
             val filesSelection =
                 "${MediaStore.Files.FileColumns.RELATIVE_PATH} = ? AND ${MediaStore.Files.FileColumns.DISPLAY_NAME} = ?"
-            val filesArgs = arrayOf(relativePath, lrcFileName)
+            val filesArgs = arrayOf(relativePath, "$baseName.lrc")
             val filesCursor = resolver.query(
                 MediaStore.Files.getContentUri("external"),
                 filesProjection, filesSelection, filesArgs, null
             )
-            val lrcPath = filesCursor?.use {
-                if (it.moveToFirst()) it.getString(0) else null
-            } ?: return null
-
+            val lrcPath = filesCursor?.use { if (it.moveToFirst()) it.getString(0) else null } ?: return null
             val lrcFile = File(lrcPath)
             if (!lrcFile.exists() || !lrcFile.canRead()) return null
-
             val encodings = listOf(Charsets.UTF_8, charset("windows-1251"), Charsets.ISO_8859_1)
             for (encoding in encodings) {
                 try {
@@ -698,8 +806,6 @@ class LyricsRepository(private val context: Context) {
             null
         }
     }
-
-    // ────────────────────────── Встраивание в файл ──────────────────────────
 
     data class EmbedResult(
         val success: Boolean,
@@ -717,8 +823,7 @@ class LyricsRepository(private val context: Context) {
             val known = listOf("mp3", "flac", "m4a", "mp4", "ogg", "wav", "wma", "aac", "opus")
             if (known.contains(pathExt)) return pathExt
         }
-        val mime = context.contentResolver.getType(track.uri)
-        return when (mime) {
+        return when (context.contentResolver.getType(track.uri)) {
             "audio/mpeg" -> "mp3"
             "audio/flac", "audio/x-flac" -> "flac"
             "audio/mp4", "audio/m4a", "audio/x-m4a" -> "m4a"
@@ -734,7 +839,7 @@ class LyricsRepository(private val context: Context) {
     suspend fun embedInFile(track: Track, content: String, isSynced: Boolean): EmbedResult = withContext(Dispatchers.IO) {
         val extension = getFileExtension(track)
         val tempFile = File(context.cacheDir, "temp_embed_${track.id}_${System.currentTimeMillis()}.$extension")
-        AppLogger.i(TAG, "embed start id=${track.id}, ext=$extension, len=${content.length}")
+        AppLogger.i(TAG, "embed start id=${track.id}, ext=$extension, len=${content.length}, synced=$isSynced")
         try {
             context.contentResolver.openInputStream(track.uri)?.use { input ->
                 tempFile.outputStream().use { output -> input.copyTo(output) }
@@ -742,7 +847,6 @@ class LyricsRepository(private val context: Context) {
                 AppLogger.e(TAG, "embed: cannot read source id=${track.id}")
                 return@withContext EmbedResult(false, error = "Не удалось прочитать файл")
             }
-
             try {
                 val audio = AudioFileIO.read(tempFile)
                 val tag: Tag = audio.tag ?: run {
@@ -757,7 +861,6 @@ class LyricsRepository(private val context: Context) {
                 tempFile.delete()
                 return@withContext EmbedResult(false, error = "Ошибка парсинга: ${e.message?.take(80)}")
             }
-
             try {
                 context.contentResolver.openOutputStream(track.uri, "wt")?.use { output ->
                     tempFile.inputStream().use { input -> input.copyTo(output) }
@@ -798,7 +901,6 @@ class LyricsRepository(private val context: Context) {
             context.contentResolver.openInputStream(track.uri)?.use { input ->
                 tempFile.outputStream().use { output -> input.copyTo(output) }
             } ?: return@withContext false
-
             val audio = AudioFileIO.read(tempFile)
             val tag: Tag = audio.tag ?: run {
                 val newTag = audio.createDefaultTag()
@@ -807,7 +909,6 @@ class LyricsRepository(private val context: Context) {
             }
             tag.setField(FieldKey.LYRICS, content)
             AudioFileIO.write(audio)
-
             context.contentResolver.openOutputStream(track.uri, "wt")?.use { output ->
                 tempFile.inputStream().use { input -> input.copyTo(output) }
             } ?: run {

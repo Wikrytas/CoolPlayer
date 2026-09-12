@@ -15,14 +15,16 @@ enum class EqPreset(val label: String) {
 }
 
 class EqualizerController {
-
     companion object {
         private const val TAG = "Eq"
-
         private var eq: Equalizer? = null
+        private var sessionId: Int = 0
+
+        /** Пресет, который хотим слышать: применяется сразу при подключении эффекта. */
+        private var desiredPreset: EqPreset? = null
 
         val isReady: Boolean get() = eq != null
-
+        val currentSession: Int get() = sessionId
         val bandCount: Short get() = eq?.numberOfBands ?: 0
 
         val bandRange: IntRange
@@ -64,7 +66,12 @@ class EqualizerController {
         }
 
         fun applyPreset(preset: EqPreset) {
-            val e = eq ?: return
+            desiredPreset = preset
+            val e = eq
+            if (e == null) {
+                AppLogger.w(TAG, "preset queued (eq not attached yet): ${preset.name}")
+                return
+            }
             AppLogger.i(TAG, "preset applied: ${preset.name}")
             runCatching {
                 val n = e.numberOfBands
@@ -106,27 +113,35 @@ class EqualizerController {
             return ys[ys.size - 1]
         }
 
-        private fun initEq(sessionId: Int) {
+        /** Подключение эффекта к аудиосессии плеера. Повторный вызов с той же сессией — no-op. */
+        private fun initEq(newSessionId: Int) {
+            if (eq != null && sessionId == newSessionId) return
             releaseEq()
             try {
-                val e = Equalizer(0, sessionId)
+                val e = Equalizer(0, newSessionId)
                 e.enabled = true
                 eq = e
-                AppLogger.i(TAG, "init: session=$sessionId, bands=${e.numberOfBands}")
+                sessionId = newSessionId
+                AppLogger.i(TAG, "init: session=$newSessionId, bands=${e.numberOfBands}")
+                // Применяем пресет, выбранный до подключения (или сохранённый)
+                desiredPreset?.let { p ->
+                    AppLogger.i(TAG, "applying queued preset: ${p.name}")
+                    applyPreset(p)
+                }
             } catch (t: Throwable) {
-                AppLogger.w(TAG, "init failed: ${t.message}")
+                AppLogger.w(TAG, "init failed: session=$newSessionId, ${t.message}")
                 eq = null
             }
         }
 
         private fun releaseEq() {
-            if (eq != null) AppLogger.d(TAG, "release")
+            if (eq != null) AppLogger.d(TAG, "release session=$sessionId")
             runCatching { eq?.release() }
             eq = null
+            sessionId = 0
         }
     }
 
     fun init(sessionId: Int) = initEq(sessionId)
-
     fun release() = releaseEq()
 }
