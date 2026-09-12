@@ -14,16 +14,9 @@ android {
         targetSdk = 35
         versionCode = 14
         versionName = "1.0.13"
-
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
-        }
-
-        // Whisper: собираем натив только под реальные ABI телефона
-        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
-        externalNativeBuild {
-            cmake { arguments += "-DANDROID_STL=c++_shared" }
         }
     }
 
@@ -65,13 +58,6 @@ android {
         compose = true
         buildConfig = true
     }
-    // Whisper (whisper.cpp) через CMake FetchContent
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
-        }
-    }
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -90,27 +76,21 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
-
     implementation(platform("androidx.compose:compose-bom:2024.09.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
-
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.core:core-splashscreen:1.0.1")
-
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("androidx.palette:palette-ktx:1.0.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
-
     implementation("androidx.media3:media3-exoplayer:1.4.1")
     implementation("androidx.media3:media3-session:1.4.1")
     implementation("androidx.media3:media3-common:1.4.1")
-
     implementation("net.jthink:jaudiotagger:2.2.5")
-
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
